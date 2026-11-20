@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { Check as CheckIcon, ClipboardCopy, Download, FileSearch, FolderOpen, Loader2, Play, RefreshCw, Square, Trash2, Wifi, X } from "lucide-react";
 import { PageHead } from "@/App";
 import type { RobotInfo } from "@/components/RobotStrip";
+import { choose } from "@/components/Confirm";
+import { StageProgress } from "@/components/StageProgress";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Field, Input } from "@/components/ui/field";
@@ -11,7 +13,7 @@ type Item = { key: string; stick: string; space: string; steps: string[] };
 type Stat = { median: number; min: number; max: number; n: number } | null;
 type Row = { kind: string; unit: string; n: number; n_steady: number; n_not_stopped: number } & Record<string, Stat | number | string>;
 type Seg = Record<string, number | string | boolean | null>;
-type Trial = { id: number; take: number; item: string; name: string; started: number; excluded?: boolean; exclude_note?: string; main: Seg };
+type Trial = { id: number; take: number; item: string; name: string; started: number; excluded?: boolean; exclude_note?: string; aborted?: boolean; ask?: boolean; main: Seg };
 type Take = { id: number; item: string; reps: number; name: string; started: number; bag: string; md5: string; size: number; status: string; note: string; n_found?: number; local_bag?: string };
 type Check = { name: string; ok: boolean | null; detail: string };
 type Live = {
@@ -31,6 +33,8 @@ type Stage = { name: string; state: "wait" | "run" | "ok" | "fail"; detail?: str
 type Finish = {
   running: boolean;
   auto?: boolean;
+  elapsed?: number;
+  total?: number;
   item: string;
   name: string;
   stages: Stage[];
@@ -108,6 +112,21 @@ export default function LBMotion({ robot, simulated }: { robot: RobotInfo | null
     }
   };
 
+  const asked = useRef(new Set<number>());
+  const pending = s && !s.live && !s.finish ? s.trials.find((t) => t.ask && !asked.current.has(t.take)) : undefined;
+  useEffect(() => {
+    if (!pending || !s) return;
+    asked.current.add(pending.take);
+    const ts = s.trials.filter((t) => t.take === pending.take);
+    const when = clock(pending.started);
+    choose(`${when} 那次自动推杆中途停止了，停止前做完 ${ts.length} 次推杆（${ts.map((t) => t.item).join("、")}）。\n保存：计入报告。\n不保存：不进报告，录包和原始记录照样留着。`, {
+      title: "中途停止的这次要保存吗",
+      yes: "保存",
+      no: "不保存",
+    }).then((v) => v !== null && call("/lbm/keep", { id: pending.take, keep: v }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pending?.take]);
+
   if (!s) return null;
   const sel = s.items.find((i) => i.key === item)!;
   const done = (k: string) => s.trials.filter((t) => t.item === k && !t.excluded).length;
@@ -115,7 +134,7 @@ export default function LBMotion({ robot, simulated }: { robot: RobotInfo | null
 
   return (
     <>
-      <PageHead title="LBMotion 推杆" desc="测摇杆推出去以后，LBMotion 和机器人实际各走了多少，以及松手后还滑多远。按顺序做：先连机器人，再选测试项点“开始录包”，按弹窗提示推杆，做完点“结束并出报告”。">
+      <PageHead title="VR部分动捕" desc="测 VR部分动捕下摇杆指令（/vr_cmd）的跟随：指令、LBMotion 内部、机器人实际各是多少，松手后多久停住。一键测由软件代替手柄推杆；也可以人拿 Pico 手动推：选测试项点“开始录包”，按弹窗提示推杆，做完点“结束并出报告”。">
         {s.report_path && (
           <Button variant="outline" onClick={() => api("/lbm/open", { body: {} })}>
             <FolderOpen />
@@ -415,6 +434,9 @@ function Finishing({ f, call }: { f: Finish; call: (p: string) => Promise<boolea
   };
   return (
     <div>
+      {f.auto ? (
+        <AutoProgress f={f} onStop={() => call("/lbm/auto/stop")} />
+      ) : (
       <ul className="space-y-2">
         {f.stages.map((st) => (
           <li key={st.name} className="flex gap-2.5 text-sm">
@@ -428,13 +450,8 @@ function Finishing({ f, call }: { f: Finish; call: (p: string) => Promise<boolea
           </li>
         ))}
       </ul>
-      {f.error && <p role="alert" className="mt-3 text-sm text-fail">{f.error}</p>}
-      {f.auto && f.running && (
-        <Button variant="danger" size="lg" className="mt-4 h-12 w-full text-base" onClick={() => call("/lbm/auto/stop")}>
-          <Square />
-          停止（危险时先按遥控器急停）
-        </Button>
       )}
+      {f.error && <p role="alert" className="mt-3 text-sm text-fail">{f.error}</p>}
 
       {f.result && (
         <div className="mt-5 border-t border-line-soft pt-4">
@@ -482,6 +499,28 @@ function Finishing({ f, call }: { f: Finish; call: (p: string) => Promise<boolea
         </div>
       )}
     </div>
+  );
+}
+
+function AutoProgress({ f, onStop }: { f: Finish; onStop: () => void }) {
+  const names = f.stages.map((st) => st.name);
+  const run = f.stages.findIndex((st) => st.state === "run");
+  const idx = run >= 0 ? run : f.stages.map((st) => st.state !== "wait").lastIndexOf(true);
+  const play = names.indexOf("自动推杆");
+  const st = f.stages[idx];
+  return (
+    <StageProgress
+      names={names}
+      idx={idx}
+      states={f.stages.map((x) => x.state)}
+      text={!f.running ? (f.error ? "已结束" : "完成") : st ? st.detail || `${st.name}…` : ""}
+      playing={idx === play}
+      done={idx > play}
+      elapsed={f.elapsed ?? 0}
+      total={f.total ?? 0}
+      onStop={f.running ? onStop : undefined}
+      stopDisabled={idx > play}
+    />
   );
 }
 

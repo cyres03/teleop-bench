@@ -89,10 +89,49 @@ def chart(res: dict, out: Path, title: str) -> None:
     plt.close(fig)
 
 
+def start_hms(r: dict) -> str:
+    """开始录包的时刻：录包名是 MMDD_HHMMSS_动作，取不到就用登记时刻。"""
+    p = r.get("name", "").split("_")
+    if len(p) >= 2 and len(p[1]) == 6 and p[1].isdigit():
+        return f"{p[1][:2]}:{p[1][2:4]}:{p[1][4:]}"
+    return r.get("time", "")
+
+
+def joint_map(runs: list[dict], out: Path) -> bool:
+    """所有关节 × 每次回放的跟踪误差热力图，误差大的关节排在上面。"""
+    runs = [r for r in runs if r["result"]["重定向→机器人"].get("关节")]
+    if not runs:
+        return False
+    err = [{j["关节"]: j["均方根deg"] for j in r["result"]["重定向→机器人"]["关节"]} for r in runs]
+    names = sorted(set().union(*err), key=lambda n: -max(e.get(n, 0) for e in err))
+    M = np.array([[e.get(n, np.nan) for e in err] for n in names])
+    plt = _plt()
+    fig, ax = plt.subplots(figsize=(max(5.5, 2 + 1.3 * len(runs)), 1.5 + 0.3 * len(names)))
+    im = ax.imshow(M, cmap="Reds", aspect="auto", vmin=0, vmax=max(15, an.TH["关节均方根deg"] * 3))
+    ax.set_xticks(range(len(runs)), [f"{start_hms(r)}\n{r['item']}" for r in runs])
+    ax.set_yticks(range(len(names)), names, fontsize=8)
+    for i in range(M.shape[0]):
+        for k in range(M.shape[1]):
+            if M[i, k] == M[i, k]:
+                ax.text(k, i, f"{M[i, k]:.1f}", ha="center", va="center", fontsize=7, color="white" if M[i, k] > 8 else "black")
+    fig.colorbar(im, ax=ax, label=f"跟踪误差均方根 °（门限 {an.TH['关节均方根deg']}°）", shrink=.6)
+    ax.set_title("重定向指令 → 机器人实际：每个关节的跟踪误差（越红越差）")
+    fig.tight_layout()
+    fig.savefig(out, dpi=110)
+    plt.close(fig)
+    return True
+
+
 def _n(v, unit="", nd=2):
     if v is None or v != v:
         return "—"
     return f"{v:.{nd}f}{unit}" if isinstance(v, float) else f"{v}{unit}"
+
+
+def _tag(r: dict) -> str:
+    if not r.get("aborted"):
+        return ""
+    return "（中途停止，待确认是否计入）" if r.get("ask") else "（中途停止）"
 
 
 def markdown(session: str, robot: str, version: str, runs: list[dict], folder: Path, history: list[dict] | None = None) -> str:
@@ -100,6 +139,19 @@ def markdown(session: str, robot: str, version: str, runs: list[dict], folder: P
         return "还没有结果。\n"
     out = [f"# 全身遥操回放测试 {session}", "",
            f"机器人 {robot or '—'}，版本 {version or '—'}。输入是 11-19 在 660 上录的 Pico 全身动捕基线包，每个版本播同一批包，输入完全相同。", "",
+           "## 怎么看", "",
+           "人的动作要经过两级才变成机器人动作：人 → 重定向 → 机器人。三级都记录下来，相邻两级一比，就知道差距出在哪一级。", "",
+           "| 数据 | 是什么 | 从哪来 |", "|-|-|-|",
+           "| 人 | 操作员身上 Pico 动捕到的动作，基线包里固定不变 | `/tf` 里的 `/vr_body/*` |",
+           "| 重定向 | 把人的动作换算成机器人各部位位置和各关节角度，是发给机器人的指令 | `/teleop/wb_cmd` |",
+           "| 机器人 | 机器人实际的关节角、朝向、位移 | `/joint/state`、`/ImuData`、腿部里程计 |", "",
+           "| 对比 | 看出什么 |", "|-|-|",
+           "| 人 → 重定向 | 重定向算得对不对：位移、朝向、手脚动作大小和快慢跟人是否一致 |",
+           "| 重定向 → 机器人 | 全身控制器执行到不到位：每个关节实际角度和指令差多少，走的距离和转的角度差多少 |",
+           f"| 跟踪误差均方根 | 一个关节在整段动作里实际角和指令角之差的平均大小，越小越好，门限 {an.TH['关节均方根deg']}° |",
+           "| 幅度比 / 相关 / 滞后 | 动作大小之比，1 为一致 / 动作形状的相似度，1 为一致 / 后一级比前一级晚多少秒 |",
+           "| 严重度 | 差距 ÷ 门限，超过门限才列入差距清单，数值越大越优先看 |", "",
+           "数值正负：前进、左移、左转为正。项名前的时间是开始播包的时刻，精确到秒。", "",
            "## 总表", "",
            "| # | 动作 | 控制器 | 跟随 s | 前进位移 m 人 / 重定向 / 机器人 | 侧移位移 m 人 / 重定向 / 机器人 | 偏航净转角 ° 人 / 重定向 / 机器人 | "
            "跟踪误差最大的关节 | 差距条数 人→重定向 / 重定向→机器人 |",
@@ -113,11 +165,15 @@ def markdown(session: str, robot: str, version: str, runs: list[dict], folder: P
         j = (s2.get("关节") or [{}])[0]
         n1 = sum(i["环节"] == "人→重定向" for i in x["差距清单"])
         n2 = sum(i["环节"] == "重定向→机器人" for i in x["差距清单"])
-        tag = "（中途停止）" if r.get("aborted") else ""
-        out.append(f"| {r['id']} | {r['item']}{tag} | {x.get('控制器') or '—'} | {x['follow_s']} | {d1['人']['前进']} / {d1['重定向']['前进']} / {_n(rob.get('前进'))} | "
+        tag = _tag(r)
+        out.append(f"| {r['id']} | {start_hms(r)} {r['item']}{tag} | {x.get('控制器') or '—'} | {x['follow_s']} | {d1['人']['前进']} / {d1['重定向']['前进']} / {_n(rob.get('前进'))} | "
                    f"{d1['人']['侧移']} / {d1['重定向']['侧移']} / {_n(rob.get('侧移'))} | "
                    f"{s1['偏航']['人净']} / {s1['偏航']['重定向净']} / {_n(y2.get('机器人净'), nd=1)} | "
                    f"{j.get('关节', '—')} {_n(j.get('均方根deg'), '°', 1)} | {n1} / {n2} |")
+    if (folder / "img" / "关节.png").exists():
+        out += ["", "## 关节：重定向指令 → 机器人实际", "",
+                "每一格是一个关节在一次回放里的跟踪误差均方根（°），越红误差越大。横看一行找哪个关节总跟不上，竖看一列找哪个动作最难。", "",
+                "![关节跟踪误差](img/关节.png)"]
     if history:
         out += ["", "## 版本对比", "", "所有真机场次里播同一批基线包的结果，每个动作、版本、机器人取最新一次。完成率 = 机器人 ÷ 重定向（主方向；转身看右转最深的角度）。", "",
                 "| 动作 | 版本 | 机器人 | 日期 | 主方向 | 重定向 | 机器人 | 完成率 | 偏航净差 ° | 关节误差均方根 中位 / 最大 ° | 差距条数 |",
@@ -133,7 +189,7 @@ def markdown(session: str, robot: str, version: str, runs: list[dict], folder: P
         rows = [(r, i) for r in runs for i in r["result"]["差距清单"] if i["环节"] == stage]
         rows.sort(key=lambda ri: -ri[1]["严重度"])
         for r, i in rows:
-            out.append(f"| {r['id']} | {r['item']} | {i['项']} | {i['前级'] or '—'} | {i['后级'] or '—'} | {i['差距']} | "
+            out.append(f"| {r['id']} | {start_hms(r)} {r['item']} | {i['项']} | {i['前级'] or '—'} | {i['后级'] or '—'} | {i['差距']} | "
                        f"{_n(i['时刻s'], nd=1)} | {i['严重度']} |")
         if not rows:
             out.append("| — | — | 没有超过门限的差距 | — | — | — | — | — |")
@@ -141,7 +197,7 @@ def markdown(session: str, robot: str, version: str, runs: list[dict], folder: P
     for r in runs:
         x = r["result"]
         s1, s2 = x["人→重定向"], x["重定向→机器人"]
-        out += [f"### {r['id']} {r['item']}（{r['time']}）", ""]
+        out += [f"### {r['id']} {start_hms(r)} {r['item']}{_tag(r)}", ""]
         img = folder / "img" / f"{r['id']}.png"
         if img.exists():
             out += [f"![{r['item']}](img/{r['id']}.png)", ""]
@@ -159,8 +215,8 @@ def markdown(session: str, robot: str, version: str, runs: list[dict], folder: P
         for k, v in s1["部位"].items():
             out.append(f"| {k} | {v['人幅度m']} | {v['重定向幅度m']} | {_n(v['比'])} | {_n(v['相关'], nd=3)} | {_n(v['滞后s'])} |")
         if s2.get("关节"):
-            out += ["", "| 关节（误差大的前 8 个） | 指令幅度 ° | 误差均方根 ° | 最大误差 ° | 最大误差时刻 s | 滞后 s |", "|-|-|-|-|-|-|"]
-            for j in s2["关节"][:8]:
+            out += ["", "| 关节（全部，按误差从大到小） | 指令幅度 ° | 误差均方根 ° | 最大误差 ° | 最大误差时刻 s | 滞后 s |", "|-|-|-|-|-|-|"]
+            for j in s2["关节"]:
                 out.append(f"| {j['关节']} | {j['指令幅度deg']} | {j['均方根deg']} | {j['最大deg']} | {j['最大差时刻s']} | {_n(j['滞后s'])} |")
         out.append("")
     th = an.TH

@@ -80,7 +80,7 @@ cat > "$APPS/teleop-bench.desktop" <<EOF
 Type=Application
 Name=遥操测试台
 Name[en]=Teleop Bench
-Comment=遥操测试自动化：指标台账、模式切换压测、长测看护、视频延迟、LBMotion 推杆
+Comment=遥操测试自动化：指标台账、模式切换压测、长测看护、视频延迟、VR部分动捕
 Exec=env BENCH_PYTHON=$PY $HERE/teleop-bench.sh
 Icon=$HERE/assets/teleop-bench.svg
 Terminal=false

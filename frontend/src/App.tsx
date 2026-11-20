@@ -19,7 +19,7 @@ const PAGES = [
   { key: "stress", label: "模式切换压测", icon: Repeat2 },
   { key: "watch", label: "长测看护", icon: Timer },
   { key: "boundary", label: "边界探测", icon: Ruler },
-  { key: "lbm", label: "LBMotion 推杆", icon: Footprints },
+  { key: "lbm", label: "VR部分动捕", icon: Footprints },
   { key: "wbt", label: "全身遥操回放", icon: PersonStanding },
   { key: "gripper", label: "夹爪夹持力", icon: Hand },
   { key: "latency", label: "视频延迟", icon: Video },

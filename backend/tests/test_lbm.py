@@ -341,3 +341,40 @@ def test_auto_run_simulated_writes_both_directions():
     assert not c.finish["error"]
     assert sorted(t["item"] for t in c.trials()) == ["前进", "前进", "后退", "后退"]
     assert all(t.get("auto") for t in c.trials())
+
+
+def test_auto_run_stopped_midway_asks_and_drop_keeps_raw_records():
+    c = LbmController()
+    c.bind(robot="SIM", version="0", simulated=True)
+    for _ in range(50):
+        if c.prep.get("ok"):
+            break
+        time.sleep(0.1)
+    c.auto_begin("前进后退", 1)
+    time.sleep(5)  # 演练 8 s 播完 33.8 s 的脚本：5 s 时第一次前进已推完，后退还没推完
+    c.auto_stop()
+    for _ in range(200):
+        if not c.finish["running"]:
+            break
+        time.sleep(0.1)
+    ts = c.trials()
+    assert [t["item"] for t in ts] == ["前进"] and all(t["aborted"] and t["ask"] for t in ts)
+    assert "中途停止，待确认是否计入" in c.markdown()
+    c.keep_aborted(ts[0]["take"], False)
+    after = c.trials()
+    assert len(after) == len(ts) and all(t["excluded"] and not t["ask"] for t in after)
+    assert c.state()["summary"] == []
+    assert "自动前进后退" not in c.markdown().split("## 逐次")[1].split("## 录包")[0]
+    c.keep_aborted(ts[0]["take"], True)  # 已经答过的不会再改
+    assert all(t["excluded"] for t in c.trials())
+
+
+def test_push_without_lbmotion_internal_is_not_summarized():
+    c = LbmController()
+    c.bind(robot="SIM", version="0", simulated=True)
+    seg = an.analyze(simulated_series("前进", [(2.0, 8.0)], 14.0))[0]
+    no = dict(seg, lbm=None, lbm_over_cmd=None, actual_over_lbm=None)
+    c._append("trials.json", [{"take": 0, "item": "前进", "name": "a", "started": 1.7e9, "main": seg},
+                              {"take": 0, "item": "前进", "name": "b", "started": 1.7e9 + 20, "main": no}])
+    assert c.state()["summary"][0]["n"] == 1
+    assert "录包里没有 LBMotion 内部速度，不计入汇总" in c.markdown()

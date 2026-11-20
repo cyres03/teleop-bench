@@ -319,7 +319,7 @@ def boundary_save():
     return boundary.state()
 
 
-# ---------- LBMotion 推杆测试 ----------
+# ---------- VR部分动捕（LBMotion）摇杆跟随测试 ----------
 class LbmBeginIn(BaseModel):
     item: str
     reps: int = 5
@@ -433,6 +433,18 @@ def lbm_exclude(body: LbmExcludeIn):
     return lbm.state()
 
 
+class KeepIn(BaseModel):
+    id: int
+    keep: bool
+
+
+@app.post("/api/lbm/keep")
+def lbm_keep(body: KeepIn):
+    _lbm().keep_aborted(body.id, body.keep)
+    _lbm().write_report()
+    return lbm.state()
+
+
 @app.delete("/api/lbm/trials/{tid}")
 def lbm_delete(tid: int):
     if not _lbm().delete(tid):
@@ -513,6 +525,12 @@ async def wbt_analyze(body: WbtAnalyzeIn):
         await asyncio.to_thread(_wbt().analyze_local, body.path, body.item)
     except Exception as exc:
         raise _bad(exc)
+    return wbt.state()
+
+
+@app.post("/api/wbt/keep")
+def wbt_keep(body: KeepIn):
+    _wbt().keep(body.id, body.keep)
     return wbt.state()
 
 
@@ -626,7 +644,7 @@ def _testing() -> str:
     if stress.run.running:
         return "模式切换压测"
     if lbm.take or (lbm.finish and lbm.finish.get("running")):
-        return "LBMotion 推杆"
+        return "VR部分动捕"
     if wbt.run and wbt.run.get("active"):
         return "全身遥操回放"
     return ""

@@ -199,6 +199,16 @@ class WbtController:
         self.write_report()
         return len(keep) != len(rows)
 
+    def keep(self, rid: int, keep: bool) -> None:
+        """中途停止的那次要不要计入报告。不计入只是不进报告，录包和记录都留着。"""
+        with self.lock:
+            rows = self.runs()
+            for r in rows:
+                if r["id"] == rid:
+                    r.update(ask=False, excluded=not keep)
+            (self._dir() / "runs.json").write_text(json.dumps(rows, ensure_ascii=False, indent=1), encoding="utf-8")
+        self.write_report()
+
     def history(self) -> list[dict]:
         """所有真机场次里播当前基线包的结果（回放包 MD5 对得上、没中途停止），每个（动作，版本，机器人）取最新一次。"""
         latest: dict[tuple, dict] = {}
@@ -458,7 +468,7 @@ class WbtController:
             rid = max([r["id"] for r in self.runs()], default=0) + 1
             tmp.replace(img / f"{rid}.png")
         row = self._save_run({"item": item, "name": name, "time": time.strftime("%H:%M:%S"), "bag": str(bag), "md5": md5,
-                              "pack_md5": pack_info(item)["md5"] if item in ITEM else "", "aborted": aborted, "note": note,
+                              "pack_md5": pack_info(item)["md5"] if item in ITEM else "", "aborted": aborted, "ask": aborted, "note": note,
                               "robot": self.robot, "version": self.version, "result": an.public(res)})
         assert row["id"] == rid
         self.write_report()
@@ -475,7 +485,12 @@ class WbtController:
 
     def write_report(self) -> tuple[str, dict]:
         p = self._dir() / "报告.md"
-        p.write_text(rp.markdown(self.session, self.robot, self.version, self.runs(), self._dir(), self.history()), encoding="utf-8")
+        runs = [r for r in self.runs() if not r.get("excluded")]
+        jm = self._dir() / "img" / "关节.png"
+        jm.parent.mkdir(exist_ok=True)
+        if not rp.joint_map(runs, jm):
+            jm.unlink(missing_ok=True)
+        p.write_text(rp.markdown(self.session, self.robot, self.version, runs, self._dir(), self.history()), encoding="utf-8")
         r = subprocess.run([sys.executable, str(TOOLS / "lint_report_style.py"), "--file", str(p)],
                            capture_output=True, text=True, timeout=60)
         m = re.search(r"错误 (\d+)，警告 (\d+)", r.stdout)

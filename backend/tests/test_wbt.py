@@ -117,3 +117,20 @@ def test_turn_issues_flag_under_rotation():
     assert an.turns([0, -300, -720, -400, 10, 5]) == {"先转": -720.0, "回转": 730.0}
     iss = an._turn_issues("重定向→机器人", {"先转": -714.0, "回转": 735.0}, {"先转": -601.0, "回转": 700.0})
     assert [i["项"] for i in iss] == ["右转幅度"]
+
+
+def test_aborted_run_dropped_from_report_but_record_kept(tmp_path):
+    import json
+    res = an.public(an.analyze_bag(str(DEMO_BAG)))
+    w = WbtController()
+    w.bind(robot="SIM", version="0", simulated=True)
+    rows = [{"id": 1, "item": "左行", "name": "1120_100000_左行", "time": "10:01:00", "bag": "a.bag", "md5": "", "aborted": False, "result": res},
+            {"id": 2, "item": "右行", "name": "1120_110000_右行", "time": "11:01:00", "bag": "b.bag", "md5": "", "aborted": True, "ask": True, "result": res}]
+    (w._dir() / "runs.json").write_text(json.dumps(rows), encoding="utf-8")
+    path, _ = w.write_report()
+    text = open(path, encoding="utf-8").read()
+    assert "10:00:00 左行" in text and "中途停止，待确认是否计入" in text and (w._dir() / "img" / "关节.png").exists()
+    w.keep(2, False)
+    text = open(path, encoding="utf-8").read()
+    assert "11:00:00 右行" not in text
+    assert len(w.runs()) == 2 and w.runs()[1]["excluded"]

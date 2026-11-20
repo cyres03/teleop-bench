@@ -1,7 +1,9 @@
-import { useEffect, useState } from "react";
-import { FileSearch, FolderOpen, Loader2, Play, Square, Trash2 } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { FileSearch, FolderOpen, Loader2, Play, Trash2 } from "lucide-react";
 import { PageHead } from "@/App";
 import type { RobotInfo } from "@/components/RobotStrip";
+import { choose } from "@/components/Confirm";
+import { StageProgress } from "@/components/StageProgress";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/field";
@@ -20,7 +22,7 @@ type Result = {
   "重定向→机器人": { 位移?: { 机器人: Disp }; 偏航?: { 机器人净: number; 机器人转动?: Turn }; 关节?: { 关节: string; 均方根deg: number; 滞后s: number }[] };
   差距清单: Issue[];
 };
-type Run = { id: number; item: string; name: string; time: string; aborted: boolean; note: string; result: Result };
+type Run = { id: number; item: string; name: string; time: string; aborted: boolean; ask?: boolean; excluded?: boolean; note: string; result: Result };
 type Live = { active: boolean; item: string; stage: string; text: string; elapsed: number; total: number };
 type Hist = {
   item: string;
@@ -80,6 +82,19 @@ export default function WBT({ robot, simulated }: { robot: RobotInfo | null; sim
       setBusy(false);
     }
   };
+
+  const asked = useRef(new Set<number>());
+  const pending = s && !s.run?.active ? s.runs.find((r) => r.ask && !asked.current.has(r.id)) : undefined;
+  useEffect(() => {
+    if (!pending) return;
+    asked.current.add(pending.id);
+    choose(`#${pending.id} ${pending.item} 回放中途停止了。\n保存：计入报告。\n不保存：不进报告，录包和原始记录照样留着。`, {
+      title: "中途停止的这次要保存吗",
+      yes: "保存",
+      no: "不保存",
+    }).then((v) => v !== null && call("/wbt/keep", { id: pending.id, keep: v }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pending?.id]);
 
   if (!s) return null;
   const sel = s.items.find((i) => i.key === item) ?? s.items[0];
@@ -163,30 +178,18 @@ export default function WBT({ robot, simulated }: { robot: RobotInfo | null; sim
 
 function Progress({ run, busy, onStop }: { run: Live; busy: boolean; onStop: () => void }) {
   const idx = STAGES.indexOf(run.stage);
-  const pct = run.stage === "回放" ? Math.min(100, (run.elapsed / Math.max(run.total, 1)) * 100) : idx > STAGES.indexOf("回放") ? 100 : 0;
   return (
-    <div className="space-y-5">
-      <ol className="flex gap-1">
-        {STAGES.slice(0, -1).map((n, i) => (
-          <li key={n} className={cn("flex-1 rounded-[3px] py-1 text-center text-xs", i < idx ? "bg-pass text-white" : i === idx ? "bg-ink text-panel" : "bg-line-soft text-ink-soft")}>
-            {n}
-          </li>
-        ))}
-      </ol>
-      <p className={cn("text-center text-lg", run.stage === "回放" && "font-semibold")}>{run.text}</p>
-      <div>
-        <div className="h-3 overflow-hidden rounded-full bg-line-soft">
-          <div className="h-full bg-ink transition-all" style={{ width: `${pct}%` }} />
-        </div>
-        <div className="num mt-1 text-right text-sm text-ink-soft">
-          {run.elapsed.toFixed(0)} / {run.total.toFixed(0)} 秒
-        </div>
-      </div>
-      <Button variant="danger" size="lg" className="h-12 w-full text-base" disabled={busy || !["检查", "录包", "回放"].includes(run.stage)} onClick={onStop}>
-        <Square />
-        停止（危险时先按遥控器急停）
-      </Button>
-    </div>
+    <StageProgress
+      names={STAGES.slice(0, -1)}
+      idx={idx}
+      text={run.text}
+      playing={run.stage === "回放"}
+      done={idx > STAGES.indexOf("回放")}
+      elapsed={run.elapsed}
+      total={run.total}
+      onStop={onStop}
+      stopDisabled={busy || !["检查", "录包", "回放"].includes(run.stage)}
+    />
   );
 }
 
@@ -248,14 +251,14 @@ function Results({ s, call }: { s: State; call: (p: string, body?: unknown, meth
       </p>
       <div className="space-y-6">
         {runs.map((r) => (
-          <RunCard key={r.id} r={r} onDelete={() => call(`/wbt/runs/${r.id}`, undefined, "DELETE")} />
+          <RunCard key={r.id} r={r} onDelete={() => call(`/wbt/runs/${r.id}`, undefined, "DELETE")} onKeep={(keep) => call("/wbt/keep", { id: r.id, keep })} />
         ))}
       </div>
     </section>
   );
 }
 
-function RunCard({ r, onDelete }: { r: Run; onDelete: () => void }) {
+function RunCard({ r, onDelete, onKeep }: { r: Run; onDelete: () => void; onKeep: (keep: boolean) => void }) {
   const x = r.result;
   const a = x["人→重定向"];
   const b = x["重定向→机器人"];
@@ -268,14 +271,21 @@ function RunCard({ r, onDelete }: { r: Run; onDelete: () => void }) {
         <h3 className="text-[15px] font-semibold">
           #{r.id} {r.item}
           <span className="ml-2 text-sm font-normal text-ink-soft">
-            {r.time} · {x.控制器 || "控制器未知"} · 跟随 {x.follow_s} s{r.aborted ? " · 中途停止" : ""}
+            {r.time} · {x.控制器 || "控制器未知"} · 跟随 {x.follow_s} s{r.aborted ? (r.excluded ? " · 中途停止，不计入报告" : " · 中途停止") : ""}
             {r.note ? ` · ${r.note}` : ""}
           </span>
         </h3>
-        <Button size="sm" variant="ghost" onClick={onDelete}>
-          <Trash2 />
-          删除
-        </Button>
+        <div className="flex gap-1">
+          {r.aborted && (
+            <Button size="sm" variant="ghost" onClick={() => onKeep(!!r.excluded)}>
+              {r.excluded ? "改为计入报告" : "改为不计入报告"}
+            </Button>
+          )}
+          <Button size="sm" variant="ghost" onClick={onDelete}>
+            <Trash2 />
+            删除
+          </Button>
+        </div>
       </div>
       <table className="mb-4 w-full text-sm">
         <thead className="text-ink-soft">

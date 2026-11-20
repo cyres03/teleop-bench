@@ -1,4 +1,4 @@
-"""LBMotion 推杆测试：给第一次用的人设计，只有“开始录包”和“结束并出报告”两个按钮。
+"""VR部分动捕（LBMotion）摇杆跟随测试：给第一次用的人设计，只有“开始录包”和“结束并出报告”两个按钮。
 
 流程：
 1. 准备机器人（换机器人时自动做）：SSH 能登 → 把 bench/lbm 下三个分析脚本按 MD5 同步到主控 ~/Cyres/lbm/tools/lbmtools/
@@ -26,6 +26,7 @@ from pathlib import Path
 from ..db import data_dir
 from ..robotstream import MROS, _json, echo_cmd
 from . import analyze as an
+from . import chart as ch
 from . import script as sc
 
 STICK = {"x": "左手摇杆前后", "y": "左手摇杆左右", "z": "右手摇杆左右"}
@@ -273,6 +274,11 @@ class LbmController:
         rows = self._load("trials.json")
         if any("plan" in r for r in rows):
             rows = self._migrate(rows)
+        # 早先的记录没有 aborted 字段，按所属录包的状态补上，没确认过的当作待确认
+        stopped = {k["id"] for k in self.takes() if k.get("status") == "中途停止"}
+        for r in rows:
+            if "aborted" not in r and r.get("take") in stopped:
+                r.update(aborted=True, ask=True)
         return rows
 
     def _migrate(self, rows: list[dict]) -> list[dict]:
@@ -327,10 +333,17 @@ class LbmController:
     def exclude(self, tid: int, excluded: bool, note: str = "") -> None:
         self._update("trials.json", tid, excluded=excluded, exclude_note=note)
 
+    def keep_aborted(self, take: int, keep: bool) -> None:
+        """中途停止那次录包里的推杆要不要计入报告。不计入只是不进汇总，录包和记录都留着。"""
+        for t in self.trials():
+            if t["take"] == take and t.get("ask"):
+                self._update("trials.json", t["id"], aborted=True, ask=False, excluded=not keep,
+                             exclude_note="" if keep else "中途停止，选择不计入报告")
+
     # ---------- 状态 ----------
     def state(self) -> dict:
         trials = self.trials()
-        mains = [t["main"] for t in trials if t.get("main") and not t.get("excluded")]
+        mains = [t["main"] for t in trials if t.get("main") and not t.get("excluded") and not ch.no_lbm(t)]
         tk = self.take
         live = None
         if tk:
@@ -600,6 +613,7 @@ class LbmController:
         self._auto_stop.clear()
         self.error = ""
         self.finish = {"running": True, "auto": True, "item": script, "name": name, "result": None, "report": "", "error": "",
+                       "elapsed": 0.0, "total": sc.timeline(script, reps)[1],
                        "stages": [{"name": n, "state": "wait"} for n in
                                   ("检查", "切到 VR部分动捕", "录包", "自动推杆", "停止录包", "主控分析", "生成报告", "恢复设置")]}
         threading.Thread(target=self._auto, args=(script, reps, name), daemon=True).start()
@@ -624,14 +638,19 @@ class LbmController:
                 cur = "自动推杆"
                 t0 = time.time()
                 while time.time() - t0 < min(total, 8) and not self._auto_stop.is_set():
-                    self._stage(cur, "run", f"演练 {(time.time() - t0) / min(total, 8) * total:.0f} / {total:.0f} 秒")
+                    f["elapsed"] = el = (time.time() - t0) / min(total, 8) * total
+                    nxt = next((p for p in sc.pushes(script, reps) if p["end"] > el), None)
+                    what = f"正在{nxt['kind']}" if nxt and nxt["start"] <= el else (f"{nxt['start'] - el:.0f} 秒后{nxt['kind']}" if nxt else "收尾，回 Walk")
+                    self._stage(cur, "run", f"演练：{what}")
                     time.sleep(0.2)
                 aborted = self._auto_stop.is_set()
-                self._stage(cur, "ok", "演练")
+                if not aborted:
+                    f["elapsed"] = total
+                self._stage(cur, "fail" if aborted else "ok", "演练：中途停止" if aborted else "演练")
                 self._stage("停止录包", "ok", "演练")
                 segs = []
                 for k in kinds:
-                    ps = [(p["start"], p["end"]) for p in sc.pushes(script, reps) if p["kind"] == k]
+                    ps = [(p["start"], p["end"]) for p in sc.pushes(script, reps) if p["kind"] == k and p["end"] <= f["elapsed"]]
                     segs += an.analyze(simulated_series(k, ps, total + 2, seed=t0))
             else:
                 c = self._ssh_factory()
@@ -674,12 +693,15 @@ class LbmController:
                     el = time.time() - t0
                     nxt = next((p for p in sc.pushes(script, reps) if p["end"] > el), None)
                     what = f"正在{nxt['kind']}" if nxt and nxt["start"] <= el else (f"{nxt['start'] - el:.0f} 秒后{nxt['kind']}" if nxt else "收尾，回 Walk")
-                    self._stage(cur, "run", f"{el:.0f} / {total:.0f} 秒，{what}")
+                    f["elapsed"] = el
+                    self._stage(cur, "run", what)
                     if self._auto_stop.is_set() or el > total + 30:
                         self._exec(c, f"kill -INT -- -{play_pid} 2>/dev/null; kill -INT {play_pid} 2>/dev/null; true")
                         aborted = True
                         break
                     time.sleep(0.5)
+                if not aborted:
+                    f["elapsed"] = total
                 self._stage(cur, "ok" if not aborted else "fail", "中途停止：机器人可能还在遥操里，用遥控器切回 Walk" if aborted else "播完")
                 cur = "停止录包"
                 self._stage(cur, "run")
@@ -707,7 +729,7 @@ class LbmController:
             tkrow = self._append("takes.json", [take])[0]
             rows = self._append("trials.json", [{"take": tkrow["id"], "item": sg["kind"], "name": name, "started": take["started"] + sg["t"],
                                                   "bag": take["bag"], "md5": take["md5"], "status": "完成", "auto": True,
-                                                  "main": sg, "segments": []} for sg in mine])
+                                                  "aborted": aborted, "ask": aborted, "main": sg, "segments": []} for sg in mine])
             path, lint = self.write_report()
             self._stage(cur, "ok", f"写作规范检查：错误 {lint['errors']}")
             f["result"] = {"take": tkrow["id"], "trials": [r["id"] for r in rows], "found": len(mine), "reps": reps * len(kinds),
@@ -757,6 +779,14 @@ class LbmController:
 
     # ---------- 报告 ----------
     def write_report(self) -> tuple[str, dict]:
+        img = self._dir() / "img" / "链路.png"
+        img.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            drawn = ch.chain(self.trials(), img, f"VR部分动捕摇杆跟随：指令 → LBMotion 内部 → 实际（{self.session}）")
+        except Exception:  # 画图失败不影响出文字报告
+            drawn = False
+        if not drawn:
+            img.unlink(missing_ok=True)
         md = self.markdown()
         p = self._dir() / "报告.md"
         p.write_text(md, encoding="utf-8")
@@ -768,7 +798,7 @@ class LbmController:
     def markdown(self) -> str:
         st = self.state()
         rows = st["summary"]
-        if not rows:
+        if not st["trials"]:
             return "还没有有效记录。\n"
 
         def f(v, unit="", pct=False, n=2):
@@ -779,31 +809,59 @@ class LbmController:
                 return f"{a}%（{b}–{c}%，n={v['n']}）"
             return f"{v['median']:.{n}f}{unit}（{v['min']:.{n}f}–{v['max']:.{n}f}，n={v['n']}）"
 
-        out = [f"# LBMotion 推杆测试 {st['session']}", "",
-               f"机器人 {st['robot'] or '—'}，版本 {st['version'] or '—'}。数值为中位数（最小–最大，样本数）。", "",
-               "## 链路逐级", "",
+        out = [f"# VR部分动捕摇杆跟随测试 {st['session']}", "",
+               f"机器人 {st['robot'] or '—'}，版本 {st['version'] or '—'}。", "",
+               "## 怎么看", "",
+               "摇杆推出去后，速度要经过三级才变成机器人的动作：指令 → LBMotion 内部 → 实际。三级都记录下来，相邻两级一比，就知道速度在哪一级变小了。", ""]
+        if (self._dir() / "img" / "链路.png").exists():
+            out += ["![指令 → 内部 → 实际](img/链路.png)", ""]
+        out += ["| 数据 | 是什么 | 从哪来 |", "|-|-|-|",
+                "| 指令 | 遥操按摇杆推的位置算出的目标速度，推到底是最大值 | `/cmd_vel` |",
+                "| LBMotion 内部 | 行走控制器 LBMotion 限速以后真正要走的速度 | `/lbmotion_states` |",
+                "| 实际 | 机器人骨盆真实的移动速度或转动角速度 | 腿部关节角 + IMU |", "",
+                "| 对比 | 看出什么 |", "|-|-|",
+                "| 内部/指令 | LBMotion 限速了多少。低于 100% 是控制器设定的速度上限，上限数值看“LBMotion 内部”列 |",
+                "| 实际/内部 | 机器人的腿能不能走出 LBMotion 要的速度。离 100% 越远，行走执行越差 |",
+                "| 实际/指令 | 操作员推杆以后机器人实际给出的比例，等于上面两级相乘 |",
+                "| 侧向偏移、朝向变化 | 直着推杆时机器人往侧面偏了多少、车头转了多少 |",
+                "| 松杆到停下、多走 | 松开摇杆后多久停住，停住前又走了多远 |", "",
+                "单位：前后、横移是 m/s，转向是 °/s。正负：前进、左移、左转为正。汇总表的数值是中位数（最小–最大，样本数）。"
+                "项名前的时间是这次推杆开始的时刻，精确到秒。", "",
+                "## 链路逐级", "",
                "| 测试项 | 次数 | 指令 | LBMotion 内部 | 实际 | 内部/指令 | 实际/内部 | 实际/指令 |",
                "|-|-|-|-|-|-|-|-|"]
         for r in rows:
             u = " " + r["unit"]
             out.append(f"| {r['kind']} | {r['n']} | {f(r['cmd'], u)} | {f(r['lbm'], u)} | {f(r['actual'], u)} | "
                        f"{f(r['lbm_over_cmd'], pct=True)} | {f(r['actual_over_lbm'], pct=True)} | {f(r['actual_over_cmd'], pct=True)} |")
-        out += ["", "## 推杆过程", "", "| 测试项 | 推杆行程 | 侧向偏移（左正） | 偏移率 | 朝向变化（左正） |", "|-|-|-|-|-|"]
+        out += ["", "## 推杆过程", "", "推杆行程：推杆期间骨盆走的距离。偏移率 = 侧向偏移 ÷ 推杆行程。", "",
+                "| 测试项 | 推杆行程 | 侧向偏移（左正） | 偏移率 | 朝向变化（左正） |", "|-|-|-|-|-|"]
         for r in rows:
             out.append(f"| {r['kind']} | {f(r['travel_m'], ' m')} | {f(r['side_m'], ' m')} | {f(r['side_rate'], pct=True)} | "
                        f"{f(r['yaw_push_deg'], '°', n=1)} |")
-        out += ["", "## 松杆后", "", "| 测试项 | 松杆到停下 | 多走（转向为多转） | 朝向变化 | 抬脚次数 | 未停次数 |", "|-|-|-|-|-|-|"]
+        out += ["", "## 松杆后", "", "多走：松杆到停下之间走的距离，转向为多转的角度。抬脚次数：松杆后又迈了几步。未停次数：录包结束时还没停下的次数。", "",
+                "| 测试项 | 松杆到停下 | 多走（转向为多转） | 朝向变化 | 抬脚次数 | 未停次数 |", "|-|-|-|-|-|-|"]
         for r in rows:
             u = "°" if r["unit"] == "°/s" else " m"
             out.append(f"| {r['kind']} | {f(r['stop_s'], ' s')} | {f(r['coast_main'], u)} | {f(r['coast_yaw_deg'], '°', n=1)} | "
                        f"{f(r['coast_steps'], n=0)} | {r['n_not_stopped']} |")
-        out += ["", "## 逐次", "", "| # | 测试项 | 推杆 s | 指令 | 内部 | 实际 | 实际/指令 | 侧向偏移 m | 朝向变化 ° | 停下 s | 多走 | 录包 |",
+        out += ["", "## 逐次", "", "| # | 测试项 | 推杆 s | 指令 | LBMotion 内部 | 实际 | 实际/指令 | 侧向偏移 m | 朝向变化 ° | 停下 s | 多走 | 录包 |",
                 "|-|-|-|-|-|-|-|-|-|-|-|-|"]
         for t in st["trials"]:
+            if t.get("aborted") and t.get("excluded"):
+                continue  # 中途停止、选了不保存：不进报告，记录留在 trials.json
             m = t.get("main") or {}
             g = lambda k: "—" if m.get(k) is None else m[k]
             ratio = "—" if m.get("actual_over_cmd") is None else f"{m['actual_over_cmd'] * 100:.1f}%"
-            item = t["item"] + ("（已排除：" + (t.get("exclude_note") or "未写原因") + "）" if t.get("excluded") else "")
+            item = f"{ch.hms(t['started'])} {t['item']}"
+            if t.get("excluded"):
+                item += "（已排除：" + (t.get("exclude_note") or "未写原因") + "）"
+            elif t.get("ask"):
+                item += "（中途停止，待确认是否计入）"
+            elif t.get("aborted"):
+                item += "（中途停止）"
+            if not t.get("excluded") and ch.no_lbm(t):
+                item += "（录包里没有 LBMotion 内部速度，不计入汇总）"
             out.append(f"| {t['id']} | {item} | {g('push_s')} | {g('cmd')} | {g('lbm')} | {g('actual')} | {ratio} | "
                        f"{g('side_m')} | {g('yaw_push_deg')} | {g('stop_s')} | {g('coast_main')} | `{t.get('name') or '—'}` |")
         takes = self.takes()
