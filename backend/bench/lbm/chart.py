@@ -39,7 +39,7 @@ def chain(trials: list[dict], out: Path, title: str) -> bool:
             ax.bar(x + (k - 1) * w, [abs(i or 0) for i in v], w, label=lab, color=c)
             for xi, vi in zip(x, v):
                 ax.text(xi + (k - 1) * w, abs(vi or 0), "—" if vi is None else f"{abs(vi):.2f}", ha="center", va="bottom", fontsize=8)
-        ax.set_xticks(x, [f"{hms(t['started'])}\n{t['item']}" + ("\n不计入" if no_lbm(t) else "") for t in g])
+        ax.set_xticks(x, [f"{hms(t['started'])}\n{t['item']}" + ("\n工作包" if t.get("workpack") else "\n不计入" if no_lbm(t) else "") for t in g])
         ax.set_ylabel(f"速度绝对值 {unit}")
         ax.set_title("平移" if unit == "m/s" else "转向")
         ax.grid(axis="y", alpha=.3)

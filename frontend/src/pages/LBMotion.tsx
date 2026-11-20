@@ -38,14 +38,17 @@ type Finish = {
   item: string;
   name: string;
   stages: Stage[];
-  result: { found: number; reps: number; summary: Row[] } | null;
+  result: { found: number; reps: number; summary: Row[]; hands?: Record<string, HandStat> | null; workpack?: boolean } | null;
   report: string;
   error: string;
 };
 type Script = { key: string; what: string; space: string; kinds: string[]; fixed_s: number; per_rep: number };
+type Workpack = { key: string; what: string; space: string; seconds: number };
+type HandStat = { 指令开合次数: number; 实际跟上次数?: number; 没跟上时刻s?: number[]; 响应中位s?: number | null; 响应最大s?: number | null };
 type State = {
   session: string;
   scripts: Script[];
+  workpacks: Workpack[];
   simulated: boolean;
   robot: string;
   items: Item[];
@@ -197,7 +200,7 @@ export default function LBMotion({ robot, simulated }: { robot: RobotInfo | null
 
       <Dialog open={dialogOpen} onOpenChange={(o) => !o && !s.live && !s.finish?.running && call("/lbm/close")}>
         {dialogOpen && (
-          <DialogContent autoFocus={false} title={s.live ? `正在录包：${s.live.item}` : s.finish!.auto ? `自动推杆：${s.finish!.item}` : `出报告：${s.finish!.item}`} className="w-[min(720px,94vw)]" closable={!s.live && !s.finish?.running}>
+          <DialogContent autoFocus={false} title={s.live ? `正在录包：${s.live.item}` : s.finish!.auto ? `${s.finish!.stages.some((x) => x.name === "播工作包") ? "工作包" : "自动推杆"}：${s.finish!.item}` : `出报告：${s.finish!.item}`} className="w-[min(720px,94vw)]" closable={!s.live && !s.finish?.running}>
             {s.live ? <Recording live={s.live} error={error || s.error} busy={busy} call={call} /> : <Finishing f={s.finish!} call={call} />}
           </DialogContent>
         )}
@@ -209,42 +212,56 @@ export default function LBMotion({ robot, simulated }: { robot: RobotInfo | null
 function AutoCard({ s, busy, call }: { s: State; busy: boolean; call: (p: string, body?: unknown) => Promise<boolean> }) {
   const [key, setKey] = useState(s.scripts[0]?.key ?? "");
   const [reps, setReps] = useState(3);
-  const sel = s.scripts.find((x) => x.key === key) ?? s.scripts[0];
-  if (!sel) return null;
-  const secs = sel.fixed_s + sel.per_rep * reps;
+  const wp = s.workpacks.find((x) => x.key === key);
+  const sel = s.scripts.find((x) => x.key === key) ?? (wp ? null : s.scripts[0]);
+  if (!sel && !wp) return null;
+  const secs = wp ? wp.seconds : sel!.fixed_s + sel!.per_rep * reps;
+  const card = (k: string, what: string) => (
+    <button key={k} role="radio" aria-checked={key === k} onClick={() => setKey(k)} className={cn("rounded-[4px] border px-3 py-2.5 text-left", key === k ? "border-ink bg-ink text-panel" : "border-line hover:bg-line-soft")}>
+      <div className="text-[15px] font-medium">{k}</div>
+      <div className={cn("mt-0.5 text-xs", key === k ? "text-panel/80" : "text-ink-soft")}>{what}</div>
+    </button>
+  );
   return (
     <div>
-      <h2 className="text-[15px] font-semibold">一键测（软件推杆，不用人拿 Pico）</h2>
-      <p className="mb-3 text-xs text-ink-soft">软件替手柄发固定的摇杆指令，每个版本输入完全一样。前后、左右成对来回，机器人走完基本回到原地。</p>
-      <div className="grid grid-cols-3 gap-1.5" role="radiogroup" aria-label="自动脚本">
-        {s.scripts.map((x) => (
-          <button key={x.key} role="radio" aria-checked={key === x.key} onClick={() => setKey(x.key)} className={cn("rounded-[4px] border px-3 py-2.5 text-left", key === x.key ? "border-ink bg-ink text-panel" : "border-line hover:bg-line-soft")}>
-            <div className="text-[15px] font-medium">{x.key}</div>
-            <div className={cn("mt-0.5 text-xs", key === x.key ? "text-panel/80" : "text-ink-soft")}>{x.what}</div>
-          </button>
-        ))}
+      <h2 className="text-[15px] font-semibold">一键测（软件代替手柄，不用人拿 Pico）</h2>
+      <p className="mb-3 text-xs text-ink-soft">每个版本输入完全一样。推杆脚本：固定的摇杆指令，前后、左右成对来回，机器人走完基本回到原地。工作包：真人干活时录的手柄数据，看推杆和灵巧手跟随。</p>
+      <div className="mb-1 text-xs text-ink-soft">推杆脚本</div>
+      <div className="grid grid-cols-3 gap-1.5" role="radiogroup" aria-label="推杆脚本">
+        {s.scripts.map((x) => card(x.key, x.what))}
       </div>
+      {s.workpacks.length > 0 && (
+        <>
+          <div className="mb-1 mt-3 text-xs text-ink-soft">工作包</div>
+          <div className="grid grid-cols-1 gap-1.5" role="radiogroup" aria-label="工作包">
+            {s.workpacks.map((x) => card(x.key, x.what))}
+          </div>
+        </>
+      )}
       <ol className="mt-3 list-decimal space-y-1 pl-5 text-sm">
-        <li>机器人挂好天车，{sel.space}。天车要有人跟着推。</li>
+        <li>机器人挂好天车，{(wp ?? sel)!.space}。天车要有人跟着推。</li>
         <li>遥控器拿在手上，随时准备急停。</li>
         <li>关掉 Pico 或退出遥操 App。</li>
         <li>机器人在 Walk 状态站稳。</li>
-        <li>点“开始”。机器人会自己进 VR部分动捕、按脚本走，最后自己回 Walk，结果自动出来。</li>
+        {wp && <li>场地空着就行，不用摆物体：只看机器人和灵巧手的动作。</li>}
+        <li>点“开始”。机器人会自己进 VR部分动捕、{wp ? "照录好的动作走和操作" : "按脚本走"}，最后自己回 Walk，结果自动出来。</li>
       </ol>
       <div className="mt-3 flex items-end gap-3">
-        <div>
-          <div className="mb-1 text-xs text-ink-soft">来回几次</div>
-          <div className="flex gap-1">
-            {[1, 2, 3, 5].map((n) => (
-              <button key={n} onClick={() => setReps(n)} className={cn("num h-11 w-11 rounded-[4px] border text-base", reps === n ? "border-ink bg-ink text-panel" : "border-line hover:bg-line-soft")}>
-                {n}
-              </button>
-            ))}
+        {!wp && (
+          <div>
+            <div className="mb-1 text-xs text-ink-soft">来回几次</div>
+            <div className="flex gap-1">
+              {[1, 2, 3, 5].map((n) => (
+                <button key={n} onClick={() => setReps(n)} className={cn("num h-11 w-11 rounded-[4px] border text-base", reps === n ? "border-ink bg-ink text-panel" : "border-line hover:bg-line-soft")}>
+                  {n}
+                </button>
+              ))}
+            </div>
           </div>
-        </div>
-        <Button variant="primary" size="lg" className="h-11 flex-1 text-base" disabled={!s.prep.ok || busy} onClick={() => call("/lbm/auto", { script: key, reps })}>
+        )}
+        <Button variant="primary" size="lg" className="h-11 flex-1 text-base" disabled={!s.prep.ok || busy} onClick={() => call("/lbm/auto", { script: key, reps: wp ? 1 : reps })}>
           <Play />
-          开始：{key} × {reps}（约 {Math.ceil((secs + 40) / 60)} 分钟）
+          开始：{key}{wp ? "" : ` × ${reps}`}（约 {Math.ceil((secs + 40) / 60)} 分钟）
         </Button>
       </div>
       {!s.prep.ok && <p className="mt-2 text-sm text-wait">左边检查清单全部打勾后才能开始。</p>}
@@ -456,7 +473,7 @@ function Finishing({ f, call }: { f: Finish; call: (p: string) => Promise<boolea
       {f.result && (
         <div className="mt-5 border-t border-line-soft pt-4">
           <div className="text-[15px]">
-            找到 <span className="num text-[22px] font-semibold">{f.result.found}</span> 次{f.auto ? "推杆" : f.item}（计划 {f.result.reps} 次）
+            找到 <span className="num text-[22px] font-semibold">{f.result.found}</span> 次{f.auto ? "推杆" : f.item}{f.result.workpack ? "（工作包里的推杆，不计入汇总）" : `（计划 ${f.result.reps} 次）`}
           </div>
           {f.result.summary.map((r) => {
             const g = (k: string) => r[k] as Stat;
@@ -475,6 +492,22 @@ function Finishing({ f, call }: { f: Finish; call: (p: string) => Promise<boolea
             </div>
             );
           })}
+          {f.result.hands && Object.keys(f.result.hands).length > 0 && (
+            <div className="mt-3">
+              <div className="mb-1 text-sm font-medium">灵巧手 指令 → 实际</div>
+              <div className="grid grid-cols-2 gap-3">
+                {Object.entries(f.result.hands).map(([k, v]) => (
+                  <Big
+                    key={k}
+                    label={`${k}：跟上 / 指令开合次数`}
+                    value={v.指令开合次数 ? `${v.实际跟上次数} / ${v.指令开合次数}` : "没开合"}
+                    sub={v.指令开合次数 ? `响应中位 ${v.响应中位s ?? "—"} s，最大 ${v.响应最大s ?? "—"} s` : ""}
+                    strong={!!v.指令开合次数 && v.实际跟上次数 !== v.指令开合次数}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
           <p className="mt-3 break-all text-xs text-ink-soft">报告已存：{f.report}（本场所有记录合在一份里，每次结束自动更新）</p>
         </div>
       )}
@@ -506,7 +539,7 @@ function AutoProgress({ f, onStop }: { f: Finish; onStop: () => void }) {
   const names = f.stages.map((st) => st.name);
   const run = f.stages.findIndex((st) => st.state === "run");
   const idx = run >= 0 ? run : f.stages.map((st) => st.state !== "wait").lastIndexOf(true);
-  const play = names.indexOf("自动推杆");
+  const play = names.findIndex((n) => n === "自动推杆" || n === "播工作包");
   const st = f.stages[idx];
   return (
     <StageProgress

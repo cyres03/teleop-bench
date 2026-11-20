@@ -37,7 +37,8 @@ def _worst_part(res: dict) -> tuple[str, int]:
 def chart(res: dict, out: Path, title: str) -> None:
     plt = _plt()
     s = res["_series"]
-    fig, ax = plt.subplots(2, 2, figsize=(13, 8.5))
+    hs = s.get("hands") or {}
+    fig, ax = plt.subplots(3 if hs else 2, 2, figsize=(13, 12.5 if hs else 8.5), squeeze=False)
     fig.suptitle(title, fontsize=14)
     a = ax[0, 0]
     a.plot(s["hn"][:, 1], s["hn"][:, 0], color=C["人"], label="人")
@@ -84,6 +85,23 @@ def chart(res: dict, out: Path, title: str) -> None:
     a.set_xlabel("跟随开始后 s")
     a.set_ylabel("°")
     a.grid(alpha=.3)
+    for k, side in enumerate(("left", "right")):
+        if not hs:
+            break
+        a = ax[2, k]
+        name = "左手" if side == "left" else "右手"
+        if side in hs:
+            tc, xc, ts, xs = hs[side]
+            a.plot(tc, xc, color=C["重定向"], ls="--", label="指令 /brainco2/hand/cmd")
+            a.plot(ts, xs, color=C["机器人"], marker=".", ms=3, label="实际 /brainco2/hand/state")
+            v = res["重定向→机器人"]["灵巧手"][name]
+            a.set_title(f"{name}开合度（四指平均）  指令 {v['指令开合次数']} 次，跟上 {v['实际跟上次数']} 次，响应中位 {v['响应中位s']} s")
+            a.legend(fontsize=9)
+        else:
+            a.set_title(f"{name}：全程没开合")
+        a.set_xlabel("跟随开始后 s")
+        a.set_ylabel("°")
+        a.grid(alpha=.3)
     fig.tight_layout()
     fig.savefig(out, dpi=110)
     plt.close(fig)
@@ -138,7 +156,7 @@ def markdown(session: str, robot: str, version: str, runs: list[dict], folder: P
     if not runs:
         return "还没有结果。\n"
     out = [f"# 全身遥操回放测试 {session}", "",
-           f"机器人 {robot or '—'}，版本 {version or '—'}。输入是 11-19 在 660 上录的 Pico 全身动捕基线包，每个版本播同一批包，输入完全相同。", "",
+           f"机器人 {robot or '—'}，版本 {version or '—'}。输入是在 660 上用 Pico 全身动捕录好的包（11-19 的基线动作、11-20 的灵巧手工作包），每个版本播同一批包，输入完全相同。", "",
            "## 怎么看", "",
            "人的动作要经过两级才变成机器人动作：人 → 重定向 → 机器人。三级都记录下来，相邻两级一比，就知道差距出在哪一级。", "",
            "| 数据 | 是什么 | 从哪来 |", "|-|-|-|",
@@ -150,6 +168,8 @@ def markdown(session: str, robot: str, version: str, runs: list[dict], folder: P
            "| 重定向 → 机器人 | 全身控制器执行到不到位：每个关节实际角度和指令差多少，走的距离和转的角度差多少 |",
            f"| 跟踪误差均方根 | 一个关节在整段动作里实际角和指令角之差的平均大小，越小越好，门限 {an.TH['关节均方根deg']}° |",
            "| 幅度比 / 相关 / 滞后 | 动作大小之比，1 为一致 / 动作形状的相似度，1 为一致 / 后一级比前一级晚多少秒 |",
+           "| 灵巧手 指令 → 实际 | 遥操发给灵巧手的开合（`/brainco2/hand/cmd`）和手指实际位置（`/brainco2/hand/state`）比：每次开合多久跟上、有没有没跟上 |",
+           "| 姿态 | 骨盆最大俯仰、横滚（IMU），看动作有多大、有没有快倒 |",
            "| 严重度 | 差距 ÷ 门限，超过门限才列入差距清单，数值越大越优先看 |", "",
            "数值正负：前进、左移、左转为正。项名前的时间是开始播包的时刻，精确到秒。", "",
            "## 总表", "",
@@ -174,6 +194,18 @@ def markdown(session: str, robot: str, version: str, runs: list[dict], folder: P
         out += ["", "## 关节：重定向指令 → 机器人实际", "",
                 "每一格是一个关节在一次回放里的跟踪误差均方根（°），越红误差越大。横看一行找哪个关节总跟不上，竖看一列找哪个动作最难。", "",
                 "![关节跟踪误差](img/关节.png)"]
+    hrows = [(r, k, v) for r in runs for k, v in (r["result"]["重定向→机器人"].get("灵巧手") or {}).items()]
+    if hrows:
+        out += ["", "## 灵巧手：指令 → 实际", "",
+                "开合度取食指到小指 4 根的平均。指令越过最大开合的一半算一次开合，实际在 2 s 内也越过一半算跟上，响应 = 两者相隔的时间。", "",
+                "| # | 动作 | 手 | 指令开合次数 | 跟上次数 | 没跟上的时刻 s | 响应 中位 / 最大 s | 开合度误差 中位 / 最大 ° |", "|-|-|-|-|-|-|-|-|"]
+        for r, k, v in hrows:
+            if not v.get("指令开合次数"):
+                out.append(f"| {r['id']} | {start_hms(r)} {r['item']} | {k} | 0 | — | — | — | — |")
+                continue
+            miss = "、".join(str(x) for x in v["没跟上时刻s"]) or "—"
+            out.append(f"| {r['id']} | {start_hms(r)} {r['item']} | {k} | {v['指令开合次数']} | {v['实际跟上次数']} | {miss} | "
+                       f"{_n(v['响应中位s'])} / {_n(v['响应最大s'])} | {v['开合度误差中位deg']} / {v['开合度误差最大deg']} |")
     if history:
         out += ["", "## 版本对比", "", "所有真机场次里播同一批基线包的结果，每个动作、版本、机器人取最新一次。完成率 = 机器人 ÷ 重定向（主方向；转身看右转最深的角度）。", "",
                 "| 动作 | 版本 | 机器人 | 日期 | 主方向 | 重定向 | 机器人 | 完成率 | 偏航净差 ° | 关节误差均方根 中位 / 最大 ° | 差距条数 |",
@@ -208,6 +240,9 @@ def markdown(session: str, robot: str, version: str, runs: list[dict], folder: P
         out += [f"- 人→重定向：骨盆轨迹差均方根 {s1['轨迹差']['均方根m']} m，最大 {s1['轨迹差']['最大m']} m（{s1['轨迹差']['最大差时刻s']} s）。",
                 f"- 人→重定向：偏航过程最大差 {s1['偏航']['曲线最大差']}°（{s1['偏航']['最大差时刻s']} s），滞后 {s1['偏航']['滞后s']} s。",
                 f"- 人→重定向：骨盆高度幅度 人 {s1['骨盆高度']['人幅度m']} m，重定向 {s1['骨盆高度']['重定向幅度m']} m。"]
+        if s2.get("姿态"):
+            z = s2["姿态"]
+            out.append(f"- 机器人姿态：骨盆俯仰最大 {z['俯仰最大deg']}°（{z['俯仰时刻s']} s），横滚最大 {z['横滚最大deg']}°（{z['横滚时刻s']} s）。")
         if s2.get("偏航"):
             y = s2["偏航"]
             out.append(f"- 重定向→机器人：偏航过程最大差 {y['曲线最大差']}°（{y['最大差时刻s']} s），滞后 {y['滞后s']} s，相关 {y['相关']}。")

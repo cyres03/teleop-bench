@@ -265,10 +265,10 @@ def test_new_robot_gets_tools_uploaded_and_up_to_date_robot_does_not():
     c.bind(robot="HU_D04_01_999", version="v", simulated=False, battery="80%")
     _wait(c, lambda: not c.prep["running"])
     assert c.prep["ok"], c.prep
-    assert sorted(p.rsplit("/", 1)[1] for p in fresh.put) == ["analyze.py", "leg_odom.py", "rosbag_lite.py"]
+    assert sorted(p.rsplit("/", 1)[1] for p in fresh.put) == ["analyze.py", "hand.py", "leg_odom.py", "rosbag_lite.py"]
     assert all(p.startswith("/home/limx/Cyres/lbm/tools/lbmtools/") for p in fresh.put)
     by = {x["name"]: x for x in c.prep["checks"]}
-    assert "已更新 3" in by["分析脚本"]["detail"] and "180" in by["磁盘空间"]["detail"]
+    assert "已更新 4" in by["分析脚本"]["detail"] and "180" in by["磁盘空间"]["detail"]
 
     same = FakeRobot(local_tool_md5())
     c2 = LbmController(ssh_factory=lambda: same)
@@ -378,3 +378,32 @@ def test_push_without_lbmotion_internal_is_not_summarized():
                               {"take": 0, "item": "前进", "name": "b", "started": 1.7e9 + 20, "main": no}])
     assert c.state()["summary"][0]["n"] == 1
     assert "录包里没有 LBMotion 内部速度，不计入汇总" in c.markdown()
+
+
+def test_hand_follow_counts_delay_and_miss():
+    from bench.lbm import hand
+    cmd = {"left": [(i * 0.02, 1.2 if 2 <= i * 0.02 < 4 or 6 <= i * 0.02 < 8 else 0.0) for i in range(500)], "right": []}
+    # 实际第一次合上晚 0.3 s，第二次没合上
+    st = {"left": [(i * 0.1, 1.1 if 2.3 <= i * 0.1 < 4.3 else 0.0) for i in range(100)], "right": []}
+    res, issues = hand.follow(cmd, st, 0.0, 10.0)
+    v = res["左手"]
+    assert v["指令开合次数"] == 4 and v["实际跟上次数"] == 2 and v["没跟上时刻s"] == [6.0, 8.0]
+    assert 0.25 <= v["响应中位s"] <= 0.35
+    assert any("没跟上" in i[3] for i in issues)
+
+
+def test_workpack_runs_in_simulation_and_is_kept_out_of_summary():
+    c = LbmController()
+    c.bind(robot="SIM", version="0", simulated=True)
+    for _ in range(50):
+        if c.prep.get("ok"):
+            break
+        time.sleep(0.1)
+    assert [w["key"] for w in c.state()["workpacks"]] == ["灵巧手取放杯"]
+    c.auto_begin("灵巧手取放杯", 3)
+    for _ in range(200):
+        if not c.finish["running"]:
+            break
+        time.sleep(0.1)
+    assert not c.finish["error"] and c.finish["result"]["workpack"]
+    assert c.takes()[-1]["note"] == "工作包回放" and c.takes()[-1]["reps"] == 1

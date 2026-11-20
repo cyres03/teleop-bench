@@ -155,3 +155,10 @@ def test_half_body_pack_has_only_vr_cmd_with_entry_buttons(tmp_path):
     t0 = rows[0][1]
     assert any(m["A"] and m["RG"] for _, t, m in rows if 0.6 <= t - t0 < 1.0)
     pack.restamp(str(out), str(tmp_path / "now.bag"), int(time.time() * 1e9))
+
+
+def test_hand_workpacks_listed_and_steps_say_empty_floor():
+    from bench.wbt.runner import ITEM, steps, pack_info
+    for k in ("灵巧手捡瓶_前40s", "灵巧手捡瓶"):
+        assert k in ITEM and pack_info(k)["seconds"] > 40
+        assert any("不用摆物体" in s for s in steps(k))

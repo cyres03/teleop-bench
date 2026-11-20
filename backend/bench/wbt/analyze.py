@@ -13,10 +13,15 @@ from pathlib import Path
 
 import numpy as np
 
+from ..lbm import hand as H
 from ..lbm import leg_odom as L
 from ..lbm import rosbag_lite as rl
 
-TOPICS = ["/tf", "/teleop/wb_cmd", "/teleop/state", "/teleop/session_state", "/ImuData", "/joint/state"]
+TOPICS = ["/tf", "/teleop/wb_cmd", "/teleop/state", "/teleop/session_state", "/ImuData", "/joint/state",
+          "/brainco2/hand/cmd", "/brainco2/hand/state"]
+HANDS = ("left", "right")
+HAND_CN = {"left": "左手", "right": "右手"}
+FINGERS = slice(2, 6)  # 食指、中指、无名指、小指；开合度取这四根的平均（rad），同 lbm/hand.py
 VB = "/vr_body/"
 SPINE = ["Pelvis", "SPINE1", "SPINE2", "SPINE3"]
 # 部位：人的骨骼链（从骨盆起）↔ 重定向锚点
@@ -82,6 +87,8 @@ def to_body(d, yaw):
 def load(path: str) -> dict:
     tf: dict[str, tuple] = {}
     hum, ret, st, imu, js, modes = [], [], [], [], [], []
+    hcmd: dict[str, list] = {h: [] for h in HANDS}
+    hst: dict[str, list] = {h: [] for h in HANDS}
     need = {VB + f for ch, _ in PARTS.values() for f in ch}
     jnames = None
     for tp, t, m in rl.Bag(path).read(TOPICS):
@@ -115,12 +122,48 @@ def load(path: str) -> dict:
         elif tp == "/teleop/session_state":
             modes.append((t, m.get("mode", "")))
         elif tp == "/ImuData":
-            imu.append((t, tuple(m["quat"]), m["euler"][2]))
+            imu.append((t, tuple(m["quat"]), m["euler"][2], m["euler"][0], m["euler"][1]))
         elif tp == "/joint/state":
             if jnames is None:
                 jnames = list(m["names"])
             js.append((t, list(m["q"])))
-    return {"hum": hum, "ret": ret, "st": st, "imu": imu, "js": js, "jnames": jnames or [], "modes": modes}
+        elif tp == "/brainco2/hand/cmd":
+            for h in m["hand_cmd"]:
+                side = h["header"]["frame_id"]
+                if side in hcmd and len(h["pos"]) == 6:
+                    hcmd[side].append((t, float(np.mean(h["pos"][FINGERS]))))
+        elif tp == "/brainco2/hand/state":
+            for side, h in zip(HANDS, m["hand_state"]):  # 状态里没写左右，按顺序：先左后右
+                if len(h["pos"]) == 6:
+                    hst[side].append((t, float(np.mean(h["pos"][FINGERS]))))
+    return {"hum": hum, "ret": ret, "st": st, "imu": imu, "js": js, "jnames": jnames or [], "modes": modes,
+            "hcmd": hcmd, "hst": hst}
+
+
+def hands(raw: dict, a: float, b: float) -> tuple[dict, list, dict]:
+    """灵巧手 指令 → 实际（算法在 lbm/hand.py，和 VR部分动捕工作包共用）；另给画图用的曲线。"""
+    res, raw_issues = H.follow(raw["hcmd"], raw["hst"], a, b)
+    issues = [_iss("重定向→机器人", *i) for i in raw_issues]
+    series = {}
+    for side in HANDS:
+        C = [x for x in raw["hcmd"][side] if a <= x[0] <= b]
+        S = [x for x in raw["hst"][side] if a <= x[0] <= b]
+        if HAND_CN[side] in res and res[HAND_CN[side]].get("指令开合次数") and C and S:
+            series[side] = (np.array([x[0] for x in C]) - a, np.degrees([x[1] for x in C]),
+                            np.array([x[0] for x in S]) - a, np.degrees([x[1] for x in S]))
+    return res, issues, series
+
+
+def posture(raw: dict, a: float, b: float, t_rel) -> dict:
+    """骨盆最大俯仰、横滚（IMU），回放前判断危险用。"""
+    imu = [x for x in raw["imu"] if a <= x[0] <= b]
+    if not imu:
+        return {}
+    r = np.degrees([x[3] for x in imu])
+    p = np.degrees([x[4] for x in imu])
+    kr, kp = int(np.argmax(np.abs(r))), int(np.argmax(np.abs(p)))
+    return {"俯仰最大deg": round(float(p[kp]), 1), "俯仰时刻s": t_rel(imu[kp][0]),
+            "横滚最大deg": round(float(r[kr]), 1), "横滚时刻s": t_rel(imu[kr][0])}
 
 
 def follow_window(st: list) -> tuple[float, float] | None:
@@ -335,6 +378,12 @@ def analyze_bag(path: str) -> dict:
                 issues.append(_iss("重定向→机器人", r["关节"], f"指令幅度 {r['指令幅度deg']}°", "",
                                    f"跟踪误差均方根 {r['均方根deg']}°，最大 {r['最大deg']:+}°", r["均方根deg"] / TH["关节均方根deg"],
                                    r["最大差时刻s"]))
+    hs, hi, hser = hands(raw, a, b)
+    if hs:
+        s2["灵巧手"] = hs
+        issues += hi
+        series["hands"] = hser
+    s2["姿态"] = posture(raw, a, b, t_rel)
     res["重定向→机器人"] = s2
     issues.sort(key=lambda x: -x["严重度"])
     res["差距清单"] = issues

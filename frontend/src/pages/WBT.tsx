@@ -19,7 +19,13 @@ type Result = {
   follow_s: number;
   控制器?: string;
   "人→重定向": { 位移: { 人: Disp; 重定向: Disp }; 偏航: { 人净: number; 重定向净: number; 人转动?: Turn; 重定向转动?: Turn } };
-  "重定向→机器人": { 位移?: { 机器人: Disp }; 偏航?: { 机器人净: number; 机器人转动?: Turn }; 关节?: { 关节: string; 均方根deg: number; 滞后s: number }[] };
+  "重定向→机器人": {
+    位移?: { 机器人: Disp };
+    偏航?: { 机器人净: number; 机器人转动?: Turn };
+    关节?: { 关节: string; 均方根deg: number; 滞后s: number }[];
+    灵巧手?: Record<string, { 指令开合次数: number; 实际跟上次数?: number; 响应中位s?: number | null; 响应最大s?: number | null }>;
+    姿态?: { 俯仰最大deg: number; 横滚最大deg: number };
+  };
   差距清单: Issue[];
 };
 type Run = { id: number; item: string; name: string; time: string; aborted: boolean; ask?: boolean; excluded?: boolean; note: string; result: Result };
@@ -116,8 +122,8 @@ export default function WBT({ robot, simulated }: { robot: RobotInfo | null; sim
         <RobotCard s={s} onRecheck={() => call("/wbt/prepare")} onConnected={() => call("/wbt/prepare")} />
 
         <section className="rounded-md border border-line bg-panel p-5">
-          <h2 className="text-[15px] font-semibold">选基线包</h2>
-          <p className="mb-3 text-xs text-ink-soft">{s.baseline}。每个版本都播这几个包。</p>
+          <h2 className="text-[15px] font-semibold">选动作包</h2>
+          <p className="mb-3 text-xs text-ink-soft">{s.baseline}。每个版本都播这几个包。灵巧手工作包第一次播，先播“前40s”。</p>
           <div className="grid grid-cols-3 gap-1.5" role="radiogroup" aria-label="基线包">
             {s.items.map((i) => (
               <button
@@ -325,6 +331,15 @@ function RunCard({ r, onDelete, onKeep }: { r: Run; onDelete: () => void; onKeep
           )}
         </tbody>
       </table>
+      {(b.灵巧手 || b.姿态) && (
+        <p className="num mb-4 text-sm text-ink-soft">
+          {b.姿态 && `骨盆俯仰最大 ${b.姿态.俯仰最大deg}°，横滚最大 ${b.姿态.横滚最大deg}°`}
+          {b.灵巧手 &&
+            Object.entries(b.灵巧手).map(([k, v]) =>
+              v.指令开合次数 ? `；${k}开合 跟上 ${v.实际跟上次数}/${v.指令开合次数} 次，响应中位 ${v.响应中位s ?? "—"} s` : `；${k}没开合`,
+            )}
+        </p>
+      )}
       <h4 className="mb-1 text-sm font-medium">差距最大的 {top.length} 项（共 {x.差距清单.length} 项）</h4>
       <table className="mb-4 w-full text-sm">
         <tbody>

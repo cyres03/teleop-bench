@@ -24,6 +24,7 @@ import time
 from pathlib import Path
 
 from ..db import data_dir
+from ..lbm.runner import pose_cmd
 from ..robotstream import MROS
 from . import analyze as an
 from . import report as rp
@@ -35,12 +36,13 @@ TOOLS = HERE.parents[1] / "tools"
 REMOTE = "~/Cyres/wbt"
 TOOL_FILES = {"pack.py": HERE / "pack.py", "bag_extract.py": HERE.parent / "lbm" / "bag_extract.py",
               "rosbag_lite.py": HERE.parent / "lbm" / "rosbag_lite.py"}
-RECORD = ("tf", "teleop/wb_cmd", "teleop/state", "teleop/session_state", "ImuData", "joint/state", "vr_cmd", "cmd_vel")
+RECORD = ("tf", "teleop/wb_cmd", "teleop/state", "teleop/session_state", "ImuData", "joint/state", "vr_cmd", "cmd_vel",
+          "brainco2/hand/cmd", "brainco2/hand/state")
 MIN_FREE_GB = 3
 HZ_S = 12        # mrostopic hz 要等多久：mros 话题握手 7 s 以上才出第一个数
 LEAD_S = 3.0      # 开始录包后多久开始回放（mros 话题握手）
 AFTER_S = 2.0     # 播完再录多久
-BASELINE = "11-19 在 660 上用 Pico + 5 个 tracker 录的全身动捕"
+BASELINE = "在 660 上用 Pico + 5 个 tracker 录的全身动捕：前 6 个是 11-19 录的基线动作，后 2 个是 11-20 录的灵巧手工作包"
 ITEMS = [
     {"key": "前进", "what": "前进 5 m", "space": "机器人前方留出 7 m 空地"},
     {"key": "后退", "what": "后退 5 m", "space": "机器人后方留出 7 m 空地"},
@@ -48,6 +50,10 @@ ITEMS = [
     {"key": "右行", "what": "横移 3 m", "space": "机器人左右两侧各留出 4 m 空地"},
     {"key": "SKU", "what": "原地 SKU 展示动作 40 s（抬手、弯腰、转身）", "space": "机器人周围 2 m 内没有人和东西"},
     {"key": "转身", "what": "原地右转 2 圈，再左转 2 圈", "space": "机器人周围 2 m 内没有人和东西"},
+    {"key": "灵巧手捡瓶_前40s", "what": "工作包前 40 s：深蹲、弯腰，手伸到地面",
+     "space": "机器人周围 1.5 m 内没有人，天车绳长够骨盆往下 0.4 m（会深蹲到手贴地）"},
+    {"key": "灵巧手捡瓶", "what": "工作包 170 s：深蹲弯腰够地上的瓶子，再站着取放",
+     "space": "机器人周围 1.5 m 内没有人，天车绳长够骨盆往下 0.4 m（会深蹲到手贴地、侧身弯腰）"},
 ]
 ITEM = {i["key"]: i for i in ITEMS}
 # 版本对比看的主方向：(分级, 字段)
@@ -57,12 +63,16 @@ MAIN = {"前进": ("位移", "前进"), "后退": ("位移", "前进"), "左行"
 
 def steps(item: str) -> list[str]:
     i = ITEM[item]
-    return [
+    out = [
         f"机器人挂好天车，{i['space']}。天车要有人跟着推。",
         "遥控器拿在手上，随时准备急停。",
-        "关掉 Pico 或退出遥操 App。不用人遥操，机器人的动作全部来自基线包。",
+        "关掉 Pico 或退出遥操 App。不用人遥操，机器人的动作全部来自录好的包。",
         "机器人在 Walk 状态站稳（遥控器或 Pico 按 RG+B）。",
-        f"点“开始”。软件播放基线包“{i['key']}”，3 秒后机器人自己进入全身遥操，做：{i['what']}。",
+    ]
+    if "灵巧手" in item:
+        out.append("场地空着就行，不用摆物体：只看机器人和灵巧手的动作。")
+    return out + [
+        f"点“开始”。软件播放“{i['key']}”，3 秒后机器人自己进入全身遥操，做：{i['what']}。",
         "播完机器人自动回到 Walk。中途有危险：先按遥控器急停，再点“停止”。",
     ]
 
@@ -356,12 +366,21 @@ class WbtController:
 
     def _run_robot(self, item: str, name: str) -> None:
         r = self.run
-        c = rec_pid = None
+        c = rec_pid = old_mode = None
         aborted = started_rt = False
         try:
             c = self._ssh_factory()
             if not self._pico_check(c):
                 raise RuntimeError("Pico 还连着：/vr_cmd 有别的发布者。退出 Pico 遥操 App 后再点开始")
+            # 预选模式必须是 VR全身动捕（2），否则 RG+A 会进 VR部分动捕；测完恢复原值
+            self._stage("检查", "确认遥操预选模式是 VR全身动捕…")
+            old_mode = parse_response(self._exec(c, pose_cmd())).get("data")
+            if old_mode is None:
+                raise RuntimeError("读不到遥操预选模式（/teleop/get_pose_ctrl_mode 没响应）：遥操节点在跑吗")
+            if old_mode != 2:
+                self._exec(c, pose_cmd(2))
+                if parse_response(self._exec(c, pose_cmd())).get("data") != 2:
+                    raise RuntimeError("预选模式没切成 VR全身动捕")
             self._stage("检查", "启动重定向（picoTF）…")
             if self._retarget(c, "status").get("data", "idle") == "idle":
                 rsp = self._retarget(c, "start")
@@ -420,6 +439,11 @@ class WbtController:
                 except Exception:  # noqa: BLE001
                     pass
         finally:
+            if c and old_mode is not None and old_mode != 2:
+                try:
+                    self._exec(c, pose_cmd(old_mode))
+                except Exception:  # noqa: BLE001
+                    pass
             if c and started_rt:
                 try:
                     self._retarget(c, "stop")

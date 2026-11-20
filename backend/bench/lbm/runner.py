@@ -1,7 +1,7 @@
 """VR部分动捕（LBMotion）摇杆跟随测试：给第一次用的人设计，只有“开始录包”和“结束并出报告”两个按钮。
 
 流程：
-1. 准备机器人（换机器人时自动做）：SSH 能登 → 把 bench/lbm 下三个分析脚本按 MD5 同步到主控 ~/Cyres/lbm/tools/lbmtools/
+1. 准备机器人（换机器人时自动做）：SSH 能登 → 把 bench/lbm 下四个分析脚本按 MD5 同步到主控 ~/Cyres/lbm/tools/lbmtools/
    → 主控有 mrosrecord → 磁盘剩余 ≥ 5 GB → 没有别的 mrosrecord 在跑。
 2. 开始录包：主控上 setsid 后台起 mrosrecord（只录分析用的话题，不限时长，最长 MAX_RECORD_S 自动结束），
    同时 SSH 读 /cmd_vel，实时数推杆次数，告诉用户现在该做什么。mros 话题握手要约 10 s，收到第一帧才提示“可以推杆”。
@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import math
@@ -39,11 +40,18 @@ ITEMS = [
     {"key": "右转", "axis": "z", "sign": -1, "stick": "右手摇杆向右推满", "space": "周围 1 m 内没有人和东西"},
 ]
 ITEM = {i["key"]: i for i in ITEMS}
-TOPICS = ("ImuData", "joint/state", "cmd_vel", "sdk_cmd_vel", "vr_cmd", "lbmotion_states", "joystick", "teleop/state", "teleop/session_state")
+TOPICS = ("ImuData", "joint/state", "cmd_vel", "sdk_cmd_vel", "vr_cmd", "lbmotion_states", "joystick", "teleop/state", "teleop/session_state",
+          "brainco2/hand/cmd", "brainco2/hand/state")
 REMOTE = "~/Cyres/lbm"
-TOOL_FILES = ("analyze.py", "leg_odom.py", "rosbag_lite.py")
+TOOL_FILES = ("analyze.py", "leg_odom.py", "rosbag_lite.py", "hand.py")
 HERE = Path(__file__).resolve().parent
 TOOLS = HERE.parents[1] / "tools"
+# 工作包：真人在 VR部分动捕下干活录的 /vr_cmd（pack.py make --half），回放看推杆跟随和灵巧手跟随
+WORKPACKS = {
+    "灵巧手取放杯": {"what": "工作包 198 s：低台前蹲下用灵巧手取放杯子，再转身走约 1.4 m 到航空箱前取放（11-20 在 660 上真人录）",
+                 "space": "机器人四周留出 2 m 空地，天车绳长够骨盆往下 0.3 m（中途会下蹲）",
+                 "file": HERE.parents[2] / "assets" / "lbm" / "灵巧手取放杯.bag"},
+}
 PUSH_S = 5.0          # 建议每次推满多久
 SETTLE_S = 3.0        # 松杆后至少等多久再推下一次
 MIN_PUSH_S = 0.5      # 短于它不算一次
@@ -89,6 +97,19 @@ def discard_cmd(name: str, pid: int) -> str:
     n = shlex.quote(name)
     return (f"cd {REMOTE}/bag; kill -INT -- -{int(pid)} 2>/dev/null; sleep 2; "
             f"rm -f {n}.bag {n}.bag.active {n}.bag.md5 {n}.log; echo OK")
+
+
+def hands_cmd(name: str) -> str:
+    n = shlex.quote(name)
+    return (f"cd {REMOTE}/tools && python3 -c 'import json,sys; from lbmtools.hand import hands_bag; "
+            f"print(\"JSON\", json.dumps(hands_bag(sys.argv[1]), ensure_ascii=False))' ../bag/{n}.bag")
+
+
+@functools.lru_cache(maxsize=None)
+def workpack_seconds(key: str) -> float:
+    from . import rosbag_lite as rl
+    _, first, last = rl.Bag(str(WORKPACKS[key]["file"])).summary()
+    return round(max(last.values()) - min(first.values()), 1)
 
 
 def analyze_cmd(name: str) -> str:
@@ -343,7 +364,7 @@ class LbmController:
     # ---------- 状态 ----------
     def state(self) -> dict:
         trials = self.trials()
-        mains = [t["main"] for t in trials if t.get("main") and not t.get("excluded") and not ch.no_lbm(t)]
+        mains = [t["main"] for t in trials if t.get("main") and not t.get("excluded") and not ch.no_lbm(t) and not t.get("workpack")]
         tk = self.take
         live = None
         if tk:
@@ -360,6 +381,7 @@ class LbmController:
                          "fixed_s": round(sc.timeline(k, 1)[1] - sum(m[4] + sc.SETTLE for m in v["moves"])),
                          "per_rep": round(sum(m[4] + sc.SETTLE for m in v["moves"]))}
                         for k, v in sc.SCRIPTS.items()],
+            "workpacks": [{"key": k, "what": v["what"], "space": v["space"], "seconds": workpack_seconds(k)} for k, v in WORKPACKS.items()],
             "prep": self.prep, "live": live, "finish": self.finish, "error": self.error, "fetching": self.fetching,
             "trials": trials, "takes": self.takes(), "summary": an.summarize(mains),
             "report_path": str(self._dir() / "报告.md") if (self._dir() / "报告.md").exists() else "",
@@ -553,6 +575,9 @@ class LbmController:
                 if not line:
                     raise RuntimeError(f"主控分析没有输出：{res.strip()[-300:]}")
                 segs = json.loads(line[5:])
+                if wp:
+                    hl = next((ln for ln in self._exec(c, hands_cmd(name), timeout=300).splitlines() if ln.startswith("JSON ")), "")
+                    take["hands"] = json.loads(hl[5:]) if hl else {}
             mine = [s for s in segs if s["kind"] == tk.item and not s["cut_start"]]
             other = len(segs) - len(mine)
             self._stage("主控分析", "ok", f"找到 {len(mine)} 次{tk.item}" + (f"，另有 {other} 段其他方向的推杆不计" if other else ""))
@@ -599,7 +624,9 @@ class LbmController:
 
     # ---------- 自动推杆（软件生成摇杆脚本，不用人拿 Pico） ----------
     def auto_begin(self, script: str, reps: int = 3) -> None:
-        if script not in sc.SCRIPTS:
+        if script in WORKPACKS:
+            reps = 1
+        elif script not in sc.SCRIPTS:
             raise ValueError("没有这个脚本")
         if not 1 <= reps <= 5:
             raise ValueError("次数 1–5")
@@ -613,9 +640,10 @@ class LbmController:
         self._auto_stop.clear()
         self.error = ""
         self.finish = {"running": True, "auto": True, "item": script, "name": name, "result": None, "report": "", "error": "",
-                       "elapsed": 0.0, "total": sc.timeline(script, reps)[1],
+                       "elapsed": 0.0, "total": workpack_seconds(script) if script in WORKPACKS else sc.timeline(script, reps)[1],
                        "stages": [{"name": n, "state": "wait"} for n in
-                                  ("检查", "切到 VR部分动捕", "录包", "自动推杆", "停止录包", "主控分析", "生成报告", "恢复设置")]}
+                                  ("检查", "切到 VR部分动捕", "录包", "播工作包" if script in WORKPACKS else "自动推杆",
+                                   "停止录包", "主控分析", "生成报告", "恢复设置")]}
         threading.Thread(target=self._auto, args=(script, reps, name), daemon=True).start()
 
     def auto_stop(self) -> None:
@@ -625,22 +653,24 @@ class LbmController:
 
     def _auto(self, script: str, reps: int, name: str) -> None:
         f = self.finish
-        kinds = [m[0] for m in sc.SCRIPTS[script]["moves"]]
-        total = sc.timeline(script, reps)[1]
+        wp = WORKPACKS.get(script)
+        kinds = [i["key"] for i in ITEMS] if wp else [m[0] for m in sc.SCRIPTS[script]["moves"]]
+        total = workpack_seconds(script) if wp else sc.timeline(script, reps)[1]
+        plan = [] if wp else sc.pushes(script, reps)
         take = {"item": script, "reps": reps, "name": name, "started": time.time(), "ended": 0, "bag": "", "md5": "",
-                "size": 0, "status": "", "note": "软件自动推杆", "auto": True}
+                "size": 0, "status": "", "note": "工作包回放" if wp else "软件自动推杆", "auto": True}
         cur, c, rec_pid, old_mode, aborted = "检查", None, None, None, False
         try:
             self._stage(cur, "run")
             if self.simulated:
                 for cur in ("检查", "切到 VR部分动捕", "录包"):
                     self._stage(cur, "ok", "演练")
-                cur = "自动推杆"
+                cur = "播工作包" if wp else "自动推杆"
                 t0 = time.time()
                 while time.time() - t0 < min(total, 8) and not self._auto_stop.is_set():
                     f["elapsed"] = el = (time.time() - t0) / min(total, 8) * total
-                    nxt = next((p for p in sc.pushes(script, reps) if p["end"] > el), None)
-                    what = f"正在{nxt['kind']}" if nxt and nxt["start"] <= el else (f"{nxt['start'] - el:.0f} 秒后{nxt['kind']}" if nxt else "收尾，回 Walk")
+                    nxt = next((p for p in plan if p["end"] > el), None)
+                    what = "正在播工作包" if wp else (f"正在{nxt['kind']}" if nxt and nxt["start"] <= el else (f"{nxt['start'] - el:.0f} 秒后{nxt['kind']}" if nxt else "收尾，回 Walk"))
                     self._stage(cur, "run", f"演练：{what}")
                     time.sleep(0.2)
                 aborted = self._auto_stop.is_set()
@@ -649,8 +679,8 @@ class LbmController:
                 self._stage(cur, "fail" if aborted else "ok", "演练：中途停止" if aborted else "演练")
                 self._stage("停止录包", "ok", "演练")
                 segs = []
-                for k in kinds:
-                    ps = [(p["start"], p["end"]) for p in sc.pushes(script, reps) if p["kind"] == k and p["end"] <= f["elapsed"]]
+                for k in ([] if wp else kinds):
+                    ps = [(p["start"], p["end"]) for p in plan if p["kind"] == k and p["end"] <= f["elapsed"]]
                     segs += an.analyze(simulated_series(k, ps, total + 2, seed=t0))
             else:
                 c = self._ssh_factory()
@@ -660,13 +690,16 @@ class LbmController:
                 old_mode = _response(self._exec(c, pose_cmd())).get("data")
                 if old_mode is None:
                     raise RuntimeError("读不到遥操预选模式（/teleop/get_pose_ctrl_mode 没响应）：遥操节点在跑吗")
-                local = data_dir() / "lbm" / "scripts" / f"{script}_x{reps}.bag"
-                local.parent.mkdir(parents=True, exist_ok=True)
-                if not local.exists():
-                    sc.make(script, reps, local)
+                if wp:
+                    local = wp["file"]
+                else:
+                    local = data_dir() / "lbm" / "scripts" / f"{script}_x{reps}.bag"
+                    local.parent.mkdir(parents=True, exist_ok=True)
+                    if not local.exists():
+                        sc.make(script, reps, local)
                 self._sync_tools(c)
                 self._sync_auto(c, local)
-                self._stage(cur, "ok", "Pico 已断开，脚本已上传")
+                self._stage(cur, "ok", "Pico 已断开，" + ("工作包已上传" if wp else "脚本已上传"))
                 cur = "切到 VR部分动捕"
                 self._stage(cur, "run")
                 if old_mode != 0:
@@ -683,16 +716,17 @@ class LbmController:
                 rec_pid = int(re.search(r"PID (\d+)", out).group(1))
                 self._auto_stop.wait(PLAY_LEAD)
                 self._stage(cur, "ok")
-                cur = "自动推杆"
+                cur = "播工作包" if wp else "自动推杆"
                 if self._auto_stop.is_set():
                     raise RuntimeError("已停止，没有开始推杆")
-                self._stage(cur, "run", "机器人会自己进 VR部分动捕并走起来，手放在遥控器急停上")
+                self._stage(cur, "run", "机器人会自己进 VR部分动捕" + ("，照录好的动作走和操作" if wp else "并走起来") + "，手放在遥控器急停上")
                 play_pid = int(re.search(r"PID (\d+)", self._exec(c, script_play_cmd(name, local.name), timeout=20)).group(1))
                 t0 = time.time()
                 while self._exec(c, f"kill -0 {play_pid} 2>/dev/null && echo RUN || echo END").strip() == "RUN":
                     el = time.time() - t0
-                    nxt = next((p for p in sc.pushes(script, reps) if p["end"] > el), None)
-                    what = f"正在{nxt['kind']}" if nxt and nxt["start"] <= el else (f"{nxt['start'] - el:.0f} 秒后{nxt['kind']}" if nxt else "收尾，回 Walk")
+                    nxt = next((p for p in plan if p["end"] > el), None)
+                    what = "正在播工作包，机器人照录好的动作做" if wp else (
+                        f"正在{nxt['kind']}" if nxt and nxt["start"] <= el else (f"{nxt['start'] - el:.0f} 秒后{nxt['kind']}" if nxt else "收尾，回 Walk"))
                     f["elapsed"] = el
                     self._stage(cur, "run", what)
                     if self._auto_stop.is_set() or el > total + 30:
@@ -719,20 +753,27 @@ class LbmController:
                 segs = json.loads(line[5:])
             mine = [sg for sg in segs if sg["kind"] in kinds and not sg["cut_start"]]
             counts = {k: sum(sg["kind"] == k for sg in mine) for k in kinds}
-            self._stage("主控分析", "ok", "，".join(f"{k} {n}/{reps} 次" for k, n in counts.items()))
+            if wp:
+                hs = (take.get("hands") or {}).get("手") or {}
+                self._stage("主控分析", "ok", "，".join([f"{k} {n} 次" for k, n in counts.items() if n] +
+                                                       [f"{k}开合 {v.get('指令开合次数', 0)} 次" for k, v in hs.items()]) or "没有推杆")
+            else:
+                self._stage("主控分析", "ok", "，".join(f"{k} {n}/{reps} 次" for k, n in counts.items()))
             cur = "生成报告"
             self._stage(cur, "run")
-            take.update(ended=time.time(), status=("中途停止" if aborted else "完成") if mine else "没有有效推杆",
+            take.update(ended=time.time(), status=("中途停止" if aborted else "完成") if (mine or wp) else "没有有效推杆",
                         n_found=len(mine), n_other=len(segs) - len(mine))
-            if not mine:
+            if not mine and not wp:
                 take["note"] += "；录包里没找到推杆：看 /teleop/state 有没有进跟随、/cmd_vel 有没有速度"
             tkrow = self._append("takes.json", [take])[0]
             rows = self._append("trials.json", [{"take": tkrow["id"], "item": sg["kind"], "name": name, "started": take["started"] + sg["t"],
                                                   "bag": take["bag"], "md5": take["md5"], "status": "完成", "auto": True,
-                                                  "aborted": aborted, "ask": aborted, "main": sg, "segments": []} for sg in mine])
+                                                  "aborted": aborted, "ask": aborted, "workpack": script if wp else "",
+                                                  "main": sg, "segments": []} for sg in mine])
             path, lint = self.write_report()
             self._stage(cur, "ok", f"写作规范检查：错误 {lint['errors']}")
-            f["result"] = {"take": tkrow["id"], "trials": [r["id"] for r in rows], "found": len(mine), "reps": reps * len(kinds),
+            f["result"] = {"take": tkrow["id"], "trials": [r["id"] for r in rows], "found": len(mine),
+                           "reps": len(mine) if wp else reps * len(kinds), "hands": (take.get("hands") or {}).get("手"), "workpack": bool(wp),
                            "summary": an.summarize([r["main"] for r in rows])}
             f["report"] = path
             if aborted and not f["error"]:
@@ -860,11 +901,32 @@ class LbmController:
                 item += "（中途停止，待确认是否计入）"
             elif t.get("aborted"):
                 item += "（中途停止）"
-            if not t.get("excluded") and ch.no_lbm(t):
+            if t.get("workpack"):
+                item += f"（工作包“{t['workpack']}”里的推杆，不计入汇总）"
+            elif not t.get("excluded") and ch.no_lbm(t):
                 item += "（录包里没有 LBMotion 内部速度，不计入汇总）"
             out.append(f"| {t['id']} | {item} | {g('push_s')} | {g('cmd')} | {g('lbm')} | {g('actual')} | {ratio} | "
                        f"{g('side_m')} | {g('yaw_push_deg')} | {g('stop_s')} | {g('coast_main')} | `{t.get('name') or '—'}` |")
         takes = self.takes()
+        wps = [k for k in takes if k.get("hands") is not None]
+        if wps:
+            out += ["", "## 工作包：灵巧手 指令 → 实际", "",
+                    "工作包是真人在 VR部分动捕下干活时录的手柄数据，回放给机器人。推杆列在上面“逐次”表，这里看灵巧手："
+                    "遥操发给手的开合（`/brainco2/hand/cmd`）和手指实际位置（`/brainco2/hand/state`）比。"
+                    "开合度取食指到小指 4 根的平均；指令越过最大开合的一半算一次开合，实际在 2 s 内也越过一半算跟上，响应 = 两者相隔的时间。", "",
+                    "| 工作包 | 开始 | 手 | 指令开合次数 | 跟上次数 | 没跟上的时刻 s | 响应 中位 / 最大 s | 开合度误差 中位 / 最大 ° |",
+                    "|-|-|-|-|-|-|-|-|"]
+            for k in wps:
+                hs = (k["hands"] or {}).get("手") or {}
+                for side, v in hs.items():
+                    if not v.get("指令开合次数"):
+                        out.append(f"| {k['item']} | {ch.hms(k['started'])} | {side} | 0 | — | — | — | — |")
+                        continue
+                    miss = "、".join(str(x) for x in v["没跟上时刻s"]) or "—"
+                    out.append(f"| {k['item']} | {ch.hms(k['started'])} | {side} | {v['指令开合次数']} | {v['实际跟上次数']} | {miss} | "
+                               f"{v['响应中位s']} / {v['响应最大s']} | {v['开合度误差中位deg']} / {v['开合度误差最大deg']} |")
+                if not hs:
+                    out.append(f"| {k['item']} | {ch.hms(k['started'])} | — | 录包里没有灵巧手数据 | — | — | — | — |")
         if takes:
             out += ["", "## 录包", "", "| 录包 | 测试项 | 计划次数 | 找到次数 | 状态 | MD5 |", "|-|-|-|-|-|-|"]
             for k in takes:
