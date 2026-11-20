@@ -101,4 +101,4 @@ echo "== 自检"
 cd "$HERE/backend"
 "$PY" -m pytest -q tests/ 2>&1 | tail -1
 echo "装好了：应用菜单或桌面上点“遥操测试台”打开。"
-[ -f "$HOME/.ssh/oli_robot_manager_ed25519" ] || echo "第一次连机器人前：连上机器人热点，运行 bash $HERE/robot-access.sh"
+echo "第一次连某台机器人时，软件顶部会让你输一次机器人密码。"

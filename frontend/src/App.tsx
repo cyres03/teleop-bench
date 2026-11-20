@@ -12,6 +12,7 @@ import WBT from "@/pages/WBT";
 import Gripper from "@/pages/Gripper";
 import Help from "@/pages/Help";
 import { ConfirmHost } from "@/components/Confirm";
+import { AccessBar } from "@/components/AccessBar";
 
 const PAGES = [
   { key: "ledger", label: "指标台账", icon: Gauge },
@@ -90,6 +91,7 @@ export default function App() {
       <RobotStrip info={robot} live={live.active} liveText={live.text} simulated={simulated} onToggleSim={toggleSim} onRefresh={refreshRobot} />
       {modeError && <div className="bg-fail px-5 py-1.5 text-sm text-white">{modeError}</div>}
       <ConfirmHost />
+      <AccessBar sn={robot?.sn ?? ""} simulated={simulated} />
       <div className="flex min-h-0 flex-1">
         <nav className="flex w-[188px] shrink-0 flex-col gap-0.5 border-r border-line bg-panel px-3 py-5" aria-label="功能">
           <div className="mb-6 px-2">

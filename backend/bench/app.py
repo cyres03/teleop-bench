@@ -23,6 +23,7 @@ from .lbm.runner import LbmController
 from .wbt.runner import WbtController
 from .gripper import GripperController
 from . import control
+from . import access
 
 ROOT = Path(__file__).resolve().parents[2]
 DIST = ROOT / "frontend" / "dist"
@@ -62,6 +63,47 @@ async def robot_status():
         ident = await read_identity()
     state["identity"] = ident
     return ident.as_dict()
+
+
+# ---------- 第一次连机器人：软件里输密码授权 ----------
+class AccessIn(BaseModel):
+    limx: str
+    guest: str = ""
+
+
+_access_cache: dict[str, dict] = {}
+
+
+@app.get("/api/robot/access")
+async def robot_access():
+    if state["simulated"]:
+        return {"sn": "", "main": True, "video": True}
+    sn = state["identity"].sn
+    if not sn:
+        return {"sn": "", "main": True, "video": True}
+    if sn not in _access_cache:
+        _access_cache[sn] = await asyncio.to_thread(access.status)
+    return {"sn": sn, **_access_cache[sn]}
+
+
+@app.post("/api/robot/access")
+async def robot_access_grant(body: AccessIn):
+    cfg = config.load()
+    sn = state["identity"].sn
+    try:
+        await asyncio.to_thread(access.authorize, cfg["ssh_host"], cfg["ssh_user"], body.limx)
+        video = ""
+        if body.guest:
+            try:
+                await asyncio.to_thread(access.authorize, cfg["video_ssh_host"], cfg["video_ssh_user"], body.guest)
+            except ValueError as exc:
+                video = f"；1.3 没授权成功（{exc}），只影响视频延迟页"
+    except Exception as exc:
+        raise _bad(exc)
+    _access_cache.pop(sn, None)
+    lbm.prepare(force=True)
+    wbt.prepare(force=True)
+    return {"ok": True, "text": "授权好了，这台机器人以后不用再输密码" + video}
 
 
 @app.post("/api/mode")
