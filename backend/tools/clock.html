@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<title>毫秒时钟</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #fff; }
+  body { display: grid; place-items: center; font-family: "DejaVu Sans Mono", "Courier New", monospace; }
+  #t { font-size: 13vw; font-weight: 700; color: #000; letter-spacing: 0.02em; }
+</style>
+<div id="t"></div>
+<script>
+  const el = document.getElementById("t");
+  const p = (n, w) => String(n).padStart(w, "0");
+  function tick() {
+    const d = new Date();
+    el.textContent = `${p(d.getHours(), 2)}:${p(d.getMinutes(), 2)}:${p(d.getSeconds(), 2)} ${p(d.getMilliseconds(), 3)}`;
+    requestAnimationFrame(tick);
+  }
+  tick();
+  document.addEventListener("click", () => document.documentElement.requestFullscreen?.());
+</script>
+</html>

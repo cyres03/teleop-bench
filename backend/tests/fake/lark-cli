@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# 假 lark-cli：只接受 docs +create，检查引用的本地文件都在，返回一个文档链接。
+set -e
+[[ "$1 $2" == "docs +create" ]] || { echo '{"ok":false,"error":"unexpected"}'; exit 1; }
+xml=""; prev=""
+for a in "$@"; do [[ "$prev" == "--content" ]] && xml="${a#@}"; prev="$a"; done
+missing=$(grep -o 'path="@\./[^"]*"' "$xml" | sed 's/path="@\.\///; s/"$//' | while read -r f; do [ -f "$f" ] || echo "$f"; done)
+if [ -n "$missing" ]; then echo "{\"ok\":false,\"error\":\"missing $missing\"}"; exit 1; fi
+echo '{"ok":true,"data":{"document":{"document_id":"FAKEDOC","url":"https://example.feishu.cn/docx/FAKEDOC"}}}'

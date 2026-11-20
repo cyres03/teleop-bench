@@ -1,0 +1,83 @@
+video_encoder: auto
+
+cameras:
+  head:
+    source: mros
+    topic: "/head/color/image_raw/compressed"
+    width: 640
+    height: 360
+    fps: 30   # 只对usb 或者gmsl 获取的摄像数据有效
+  left_hand:
+    source: mros
+    topic: "/left_wrist/color/image_raw/compressed"
+    width: 640
+    height: 360
+    fps: 20
+  right_hand:
+    source: mros
+    topic: "/right_wrist/color/image_raw/compressed"
+    width: 640
+    height: 360
+    fps: 20
+
+local:
+  port: 4433
+  token: "TOKEN"
+  codec: jpeg # auto | jpeg（走 QUIC）| h264 | h265（走点对点 WebRTC）；头显不支持该编码时自动退回 JPEG
+  streams:
+    - { camera: head, jpeg_quality: 0 }
+    - { camera: left_hand, jpeg_quality: 0 }
+    - { camera: right_hand, jpeg_quality: 0 }
+
+remote:
+  # 远程二选一：trro 与 livekit 不能同时 enabled=true。
+  trro:
+    enabled: true
+    config_path: "trro/config.json"   # TRRO SDK 配置，相对本文件所在目录
+    platform_credentials: true        # 设备凭据由 RoboNexus 按本机 SN 下发
+    codec: h265
+    streams:                          # 列表顺序即 TRRO stream id：0 / 1 / 2
+      - { camera: head }
+      - { camera: left_hand }
+      - { camera: right_hand }
+  livekit:
+    enabled: false
+    platform: true
+    url: "ws://rtc.limxdynamics.com:7880"
+    api_key: "KEY"
+    api_secret: "SECRET"
+    room: ""
+    identity: "monocular_camera"
+    display_name: "oli_edu"
+    codec: h265
+    tracks:
+      - { camera: head, name: head_camera, bitrate: 2M, fps: 20 }
+      - { camera: left_hand, name: left_hand_camera, bitrate: 500K, fps: 15 }
+      - { camera: right_hand, name: right_hand_camera, bitrate: 500K, fps: 15 }
+    data_channels:
+      - mros_topic: "/monitor"
+        livekit_topic: "monitor"
+        max_hz: 1
+        reliable: false
+
+audio:
+  enabled: true
+  quic_enabled: true
+  capture_topic: "/audio/capture"
+  playback_topic: "/audio/playback"
+  sample_rate: 16000
+  channels: 1
+  robot_track_name: "robot_mic"
+  headset_track_name: "pico_mic"
+
+control:
+  robot_ws:
+    enabled: true
+    url: "ws://10.192.1.2:5000"
+
+tracking:
+  smoothing:
+    head_alpha: 0.7
+    controllers_alpha: 0.7
+    hands_alpha: 0.7
+    body_alpha: 0.7

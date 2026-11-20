@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# 假 ffmpeg：遇到 v4l2 采集就交给 fake_cam.py 生成录像，其余参数原样交给真 ffmpeg。
+HERE="$(cd "$(dirname "$0")" && pwd)"
+if [[ " $* " == *" -f v4l2 "* ]]; then
+	dev=""; dur=""; out="${@: -1}"; prev=""
+	for a in "$@"; do
+		[[ "$prev" == "-i" ]] && dev="$a"
+		[[ "$prev" == "-t" ]] && dur="$a"
+		prev="$a"
+	done
+	exec "$FAKE_PY" "$HERE/fake_cam.py" "$dev" "$out" "$dur" "$REAL_FFMPEG"
+fi
+exec "$REAL_FFMPEG" "$@"

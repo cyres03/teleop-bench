@@ -1,0 +1,10 @@
+遥操测试台（Teleop Bench）安装
+
+1. 在本目录打开终端，运行：bash install.sh
+   要联网，第一次 3–10 分钟。最后显示“N passed”就是装好了。
+   提示 sudo apt install ... 就照着装（24.04 常见：python3.12-venv、libxcb-cursor0）。
+2. 每台机器人第一次用之前：连上机器人热点（HU_ 开头），运行：bash robot-access.sh
+   按提示输入机器人 limx（1.2）和 guest（1.3）的登录密码，密码不保存。
+3. 应用菜单或桌面上点“遥操测试台”打开。
+
+详细说明：docs/使用说明.md
