@@ -17,13 +17,13 @@ say "1/3 装系统组件"
 PKGS="git python3-venv python3-pip libxcb-cursor0 libxkbcommon-x11-0 libnss3 openssh-client network-manager"
 MISSING=""
 for p in $PKGS; do dpkg -s "$p" >/dev/null 2>&1 || MISSING="$MISSING $p"; done
-if [ -n "$MISSING" ]; then
+if [ -n "$MISSING" ] && [ -z "${SKIP_APT:-}" ]; then
 	echo "要装：$MISSING"
 	echo "下面会问“[sudo] password”，输入这台电脑的开机密码（输入时屏幕上不显示，输完直接回车）："
-	sudo apt-get update -qq </dev/tty || die "apt 更新失败，检查网络"
-	sudo apt-get install -y -qq $MISSING </dev/tty || die "系统组件没装上"
+	sudo apt-get update -qq || die "apt 更新失败：密码输错了，或者网络不通"
+	sudo apt-get install -y -qq $MISSING || die "系统组件没装上"
 else
-	echo "已经都有了"
+	echo "已经都有了${MISSING:+（跳过：$MISSING）}"
 fi
 
 say "2/3 下载软件到 $DIR"
