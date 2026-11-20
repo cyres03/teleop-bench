@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """全身遥操回放包：做包（电脑上）和播放（主控上）。只用标准库，主控上和 bag_extract.py、rosbag_lite.py 放一起直接跑。
 
-做包：python3 pack.py make <原始录包> <输出包> [--clip 起 止]（秒，相对跟随开始；不写就是整段跟随）
+做包：python3 pack.py make <原始录包> <输出包> [--clip 起 止]（秒，相对跟随开始；不写就是整段跟随）[--half]
   1. 只留跟随段（/teleop/state 最长一段 1），加 /vr_cmd 和人体 /tf（pico_ 和 /vr_body/*，不带机器人自己的 /tf）。
+     --half：半身（VR部分动捕）工作包，只留 /vr_cmd（手柄位姿、摇杆、扳机）。
   2. /vr_cmd 里的 A/B/X/Y 全部清掉：全身模式下单按 A/X/Y 会切控制器，回放只要姿态、握把和扳机。
   3. 开头补 LEAD 秒“进入遥操”：人保持第一帧姿势，先按一次 RG+A（进入遥操模式），再按住第一帧的握把
      （握把是数据总开关，按住就跟随）。结尾补 TAIL 秒：保持最后一帧，RG+B（回 Walk）后全部松开。
@@ -115,6 +116,8 @@ def _frozen(vid, tid, vr_frame, tf_group, start, dur, period, seq0, buttons):
         d = bytearray(vr_set(vr_frame, **buttons(i * period / 1e9)))
         set_header(d, 0, *_split(t), seq=seq0 + i)
         out.append((vid, *_split(t), bytes(d)))
+    if not tf_group:
+        return out
     g0 = _ns(*tf_group[0][1:3])
     for t in range(start, start + n * period, int(1e9 / TF_HZ)):
         for m in tf_group:
@@ -134,15 +137,17 @@ def _tf_group(tf_msgs, last=False):
     return sorted(g, key=lambda m: (m[1], m[2]))
 
 
-def make(src: str, dst: str, clip: tuple[float, float] | None = None) -> dict:
+def make(src: str, dst: str, clip: tuple[float, float] | None = None, half: bool = False) -> dict:
     a, b = follow_window(src)
     if clip:  # 只要跟随段里的一截，秒数相对跟随开始
         a, b = a + clip[0], min(b, a + clip[1])
-    conns, msgs = be.read_raw(src, ["/vr_cmd", "/tf"], a, b, HUMAN_TF, absolute=True)
+    conns, msgs = be.read_raw(src, ["/vr_cmd"] if half else ["/vr_cmd", "/tf"], a, b, HUMAN_TF, absolute=True)
     ids = {topic.decode(): nid for nid, topic, _ in conns}
-    if "/vr_cmd" not in ids or "/tf" not in ids:
-        raise SystemExit("跟随段里缺 /vr_cmd 或人体 /tf：要用 Pico 全身动捕的原始录包")
-    vid, tid = ids["/vr_cmd"], ids["/tf"]
+    if "/vr_cmd" not in ids:
+        raise SystemExit("跟随段里没有 /vr_cmd")
+    if not half and "/tf" not in ids:
+        raise SystemExit("跟随段里缺人体 /tf：全身工作包要用 Pico 全身动捕的原始录包；半身工作包加 --half")
+    vid, tid = ids["/vr_cmd"], ids.get("/tf")
     body = [(n, s_, ns, vr_set(d, X=False, Y=False, A=False, B=False) if n == vid else d) for n, s_, ns, d in msgs]
     vr = [m for m in body if m[0] == vid]
     tf_msgs = [m for m in body if m[0] == tid]
@@ -166,12 +171,14 @@ def make(src: str, dst: str, clip: tuple[float, float] | None = None) -> dict:
     (seq_first,) = struct.unpack_from("<I", first, 0)
     (seq_last,) = struct.unpack_from("<I", last, 0)
     n_lead = int(LEAD * 1e9 / period)
-    lead = _frozen(vid, tid, first, _tf_group(tf_msgs), t0 - n_lead * period, LEAD, period, seq_first - n_lead, lead_btn)
-    tail = _frozen(vid, tid, last, _tf_group(tf_msgs, last=True), t1 + period, TAIL, period, seq_last + 1, tail_btn)
+    g_first = _tf_group(tf_msgs) if tf_msgs else []
+    g_last = _tf_group(tf_msgs, last=True) if tf_msgs else []
+    lead = _frozen(vid, tid, first, g_first, t0 - n_lead * period, LEAD, period, seq_first - n_lead, lead_btn)
+    tail = _frozen(vid, tid, last, g_last, t1 + period, TAIL, period, seq_last + 1, tail_btn)
     allm = sorted(lead + body + tail, key=lambda m: (m[1], m[2]))
     size, _ = be.write_bag(dst, conns, allm)
     span = (_ns(*allm[-1][1:3]) - _ns(*allm[0][1:3])) / 1e9
-    return {"dst": dst, "messages": len(allm), "seconds": round(span, 1), "follow_s": round((b - a), 1), "mb": round(size / 1e6, 1)}
+    return {"dst": dst, "mode": "半身" if half else "全身", "messages": len(allm), "seconds": round(span, 1), "follow_s": round((b - a), 1), "mb": round(size / 1e6, 1)}
 
 
 def restamp(src: str, dst: str, start_ns: int) -> float:
@@ -199,7 +206,7 @@ def main():
         if "--clip" in sys.argv:
             i = sys.argv.index("--clip")
             clip = (float(sys.argv[i + 1]), float(sys.argv[i + 2]))
-        print(make(sys.argv[2], sys.argv[3], clip))
+        print(make(sys.argv[2], sys.argv[3], clip, half="--half" in sys.argv))
     elif len(sys.argv) >= 3 and sys.argv[1] == "play":
         src = sys.argv[2]
         # 改时间戳要时间（主控上约 0.1 s/MB），预留出来，让第一帧的 stamp 落在开播那一刻

@@ -134,3 +134,24 @@ def test_aborted_run_dropped_from_report_but_record_kept(tmp_path):
     text = open(path, encoding="utf-8").read()
     assert "11:00:00 右行" not in text
     assert len(w.runs()) == 2 and w.runs()[1]["excluded"]
+
+
+def test_half_body_pack_has_only_vr_cmd_with_entry_buttons(tmp_path):
+    from bench.lbm import bag_extract as be
+    # 拼一个“原始录包”：回放包里的 /vr_cmd + /tf，再配上全程为 1 的 /teleop/state
+    conns, msgs = be.read_raw(str(pack_path("右行")), ["/vr_cmd", "/tf"])
+    sc, sm = be.read_raw(str(DEMO_BAG), ["/teleop/state"])
+    on = bytes(8) + b"\x01\x00\x00\x00\x01"  # Int8MultiArray：layout 为空，data = [1]（在跟随）
+    sid = max(c[0] for c in conns) + 1
+    t_a, t_b = msgs[0][1], msgs[-1][1]
+    st = [(sid, sec, 0, on) for sec in range(t_a, t_b + 1)]
+    raw = tmp_path / "raw.bag"
+    be.write_bag(str(raw), conns + [(sid, sc[0][1], sc[0][2])], sorted(msgs + st, key=lambda m: (m[1], m[2])))
+    out = tmp_path / "half.bag"
+    info = pack.make(str(raw), str(out), half=True)
+    assert info["mode"] == "半身"
+    rows = list(rl.Bag(str(out)).read(["/vr_cmd", "/tf"]))
+    assert {tp for tp, _, _ in rows} == {"/vr_cmd"}
+    t0 = rows[0][1]
+    assert any(m["A"] and m["RG"] for _, t, m in rows if 0.6 <= t - t0 < 1.0)
+    pack.restamp(str(out), str(tmp_path / "now.bag"), int(time.time() * 1e9))
