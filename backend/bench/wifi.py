@@ -5,13 +5,16 @@
 """
 from __future__ import annotations
 
+import os
 import subprocess
 
 PREFIX = ("HU_", "DACH_", "WF_", "PF_", "SF_")
 
 
 def _run(args: list[str], timeout: float = 30) -> str:
-    p = subprocess.run(["nmcli", *args], capture_output=True, text=True, timeout=timeout)
+    # 固定英文输出：系统切成中文后 nmcli 会把状态等字段翻译掉，解析就对不上
+    p = subprocess.run(["nmcli", *args], capture_output=True, text=True, timeout=timeout,
+                       env={**os.environ, "LC_ALL": "C", "LANGUAGE": ""})
     if p.returncode:
         raise RuntimeError((p.stderr or p.stdout).strip()[-300:] or f"nmcli 失败（{p.returncode}）")
     return p.stdout
